@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+fire-venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+.mypy_cache/
+.vscode/
+
+# Environment Variables
+.env
+.mock_fire_state # From firms_api mock
+/tmp/ # Temporary directory used on VM and locally

@@ -1,0 +1,7 @@
+# src/cloud_functions/pipeline_initiator/requirements.txt
+requests
+pandas
+google-cloud-storage
+google-cloud-aiplatform
+earthengine-api # Required by SatelliteImageryAcquirer
+# Pillow # Was removed in previous step, confirming it's still removed.

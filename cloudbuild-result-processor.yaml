@@ -1,0 +1,37 @@
+# fire-detection-app/cloudbuild-result-processor.yaml
+steps:
+# Step 1: Create a staging directory for the function
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    mkdir -p deploy_staging/result_processor
+    cp src/cloud_functions/result_processor/main.py deploy_staging/result_processor/main.py
+    cp src/cloud_functions/result_processor/requirements.txt deploy_staging/result_processor/requirements.txt
+    # Copy the entire shared 'src' directory
+    cp -r src deploy_staging/result_processor/src
+
+# Step 2: Deploy the function from the staging directory
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: 'gcloud'
+  args:
+  - 'functions'
+  - 'deploy'
+  - 'ResultProcessorCF'
+  - '--gen2'
+  - '--runtime=python311'
+  - '--region=asia-southeast2'
+  - '--source=./deploy_staging/result_processor' # Source is the prepared staging dir
+  - '--entry-point=result_processor_cloud_function'
+  - '--trigger-topic=vertex-job-completion-topic'
+  - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
+  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,FIRMS_API_KEY=0331973a7ee830ca7f026493faaa367a,GCP_REGION=asia-southeast2'
+  - '--timeout=540s'
+  - '--memory=1024MB'
+  - '--project=haryo-kebakaran'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  # machineType: 'E2_MEDIUM'
+timeout: '1200s'
