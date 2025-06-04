@@ -67,6 +67,7 @@ src/
   satellite_imagery_acquirer/
     acquirer.py
 .gcloudignore
+.gitignore
 cloudbuild-pipeline-initiator.yaml
 cloudbuild-result-processor.yaml
 cloudbuild.yaml
@@ -76,550 +77,300 @@ requirements.txt
 <files>
 This section contains the contents of the repository's files.
 
-<file path=".gcloudignore">
-# .gcloudignore
-.gcloudignore
-.git/
-.gitignore
-__pycache__/
-*.py[cod]
-*$py.class
-*~
-fire-venv/ # Or whatever your virtual environment folder is named
-
-# Optional: Add other files/directories you don't want to deploy
-# For example, local test outputs or large data files not needed by the function
-*.test
-*.png # If you have test images at the root you don't want to deploy
-dummy_*.pth
-# node_modules/ (if you had any)
-# .vscode/
-# .idea/
-</file>
-
-<file path="cloudbuild-pipeline-initiator.yaml">
-# fire-detection-app/cloudbuild-pipeline-initiator.yaml
-steps:
-# Step 1: Create a staging directory for the function
-- name: 'gcr.io/cloud-builders/gcloud'
-  entrypoint: 'bash'
-  args:
-  - '-c'
-  - |
-    mkdir -p deploy_staging/pipeline_initiator
-    cp src/cloud_functions/pipeline_initiator/main.py deploy_staging/pipeline_initiator/main.py
-    cp src/cloud_functions/pipeline_initiator/requirements.txt deploy_staging/pipeline_initiator/requirements.txt
-    # Copy the entire shared 'src' directory into the staging area for this function
-    # This makes 'from src.common...' imports work.
-    cp -r src deploy_staging/pipeline_initiator/src
-
-# Step 2: Deploy the function from the staging directory
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk' # Official Cloud SDK image
-  entrypoint: 'gcloud'
-  args:
-  - 'functions'
-  - 'deploy'
-  - 'PipelineInitiatorCF'
-  - '--gen2'
-  - '--runtime=python311'
-  - '--region=asia-southeast2'
-  - '--source=./deploy_staging/pipeline_initiator' # Source is now the prepared staging dir
-  - '--entry-point=pipeline_initiator_cloud_function'
-  - '--trigger-topic=wildfire-pipeline-initiator'
-  - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
-  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,FIRMS_API_KEY=0331973a7ee830ca7f026493faaa367a,VERTEX_AI_MODEL_NAME=dummy_wildfire_detector_v1,VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME=vertex-job-completion-topic' # <-- ADDED NEW ENV VAR HERE
-  - '--timeout=540s'
-  - '--memory=512MB'
-  - '--project=haryo-kebakaran'
-
-options:
-  logging: CLOUD_LOGGING_ONLY
-  # machineType: 'E2_MEDIUM' # Optional: specify machine type for the build itself
-timeout: '1200s' # Timeout for the entire Cloud Build job (all steps)
-</file>
-
-<file path="cloudbuild-result-processor.yaml">
-# fire-detection-app/cloudbuild-result-processor.yaml
-steps:
-# Step 1: Create a staging directory for the function
-- name: 'gcr.io/cloud-builders/gcloud'
-  entrypoint: 'bash'
-  args:
-  - '-c'
-  - |
-    mkdir -p deploy_staging/result_processor
-    cp src/cloud_functions/result_processor/main.py deploy_staging/result_processor/main.py
-    cp src/cloud_functions/result_processor/requirements.txt deploy_staging/result_processor/requirements.txt
-    # Copy the entire shared 'src' directory
-    cp -r src deploy_staging/result_processor/src
-
-# Step 2: Deploy the function from the staging directory
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  entrypoint: 'gcloud'
-  args:
-  - 'functions'
-  - 'deploy'
-  - 'ResultProcessorCF'
-  - '--gen2'
-  - '--runtime=python311'
-  - '--region=asia-southeast2'
-  - '--source=./deploy_staging/result_processor' # Source is the prepared staging dir
-  - '--entry-point=result_processor_cloud_function'
-  - '--trigger-topic=vertex-job-completion-topic'
-  - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
-  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,FIRMS_API_KEY=0331973a7ee830ca7f026493faaa367a,GCP_REGION=asia-southeast2'
-  - '--timeout=540s'
-  - '--memory=1024MB'
-  - '--project=haryo-kebakaran'
-
-options:
-  logging: CLOUD_LOGGING_ONLY
-  # machineType: 'E2_MEDIUM'
-timeout: '1200s'
-</file>
-
-<file path="src/common/config.py">
-# src/common/config.py
-
-"""
-Global configuration settings for the Wildfire Detection System.
-"""
-
-# Define the geographic areas to monitor for wildfires.
-# Each region is a dictionary with:
-# - 'id': A unique identifier for the region.
-# - 'name': A human-readable name for the region.
-# - 'bbox': A bounding box defined as [min_longitude, min_latitude, max_longitude, max_latitude].
-# - 'description': A brief description of the region.
-MONITORED_REGIONS = [
-    {
-        "id": "california_central",
-        "name": "Central California Wildfire Zone",
-        "bbox": [-122.0, 36.0, -118.0, 38.0],  # [min_lon, min_lat, max_lon, max_lat]
-        "description": "A test region in Central California prone to wildfires."
-    },
-    {
-        "id": "australia_southeast",
-        "name": "Southeast Australia Bushfire Zone",
-        "bbox": [140.0, -38.0, 153.0, -28.0],
-        "description": "A test region in Southeast Australia."
-    }
-    # Add more regions as needed
-]
-
-# Your Google Cloud Storage bucket name.
-# This bucket will be used to store raw data, processed outputs (maps, metadata),
-# and Vertex AI batch prediction inputs/outputs.
-GCS_BUCKET_NAME = "fire-app-bucket" # Updated to your specified bucket name
-</file>
-
-<file path="src/firms_data_retriever/retriever.py">
-# src/firms_data_retriever/retriever.py
+<file path="src/cloud_functions/pipeline_initiator/main.py">
+# src/cloud_functions/pipeline_initiator/main.py
 
 import os
 import logging
-import requests
-import pandas as pd
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+import json
+from datetime import datetime, timedelta, timezone as dt_timezone
 
-# Import MONITORED_REGIONS from the common config file
-from src.common.config import MONITORED_REGIONS
 
-# --- Configuration ---
-# Assume these are set as environment variables in Cloud Functions for production deployment
-# For local testing, ensure FIRMS_API_KEY is set in your environment.
-FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
-FIRMS_API_BASE_URL = "https://firms.modaps.eosdis.nasa.gov/api/country/csv/"
+from google.cloud import storage
+from google.cloud import aiplatform # Main SDK client initialization
 
-# Define the sensors we want to query. VIIRS generally provides higher resolution and confidence.
-FIRMS_SENSORS = ["VIIRS_SNPP", "VIIRS_NOAA20"]
+# Import the specific client for submitting jobs
+from google.cloud.aiplatform_v1.services.job_service import JobServiceClient
 
-# --- Logging Setup ---
-# Configure logging to output structured JSON for GCP Cloud Logging
-# For local testing, this will print JSON to console. In Cloud Functions, GCP automatically
-# parses JSON lines printed to stdout/stderr.
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-logger = logging.getLogger(__name__)
+# DIRECTLY import the types we need from their specific modules
+from google.cloud.aiplatform_v1.types.batch_prediction_job import BatchPredictionJob
+# Correct and confirmed import for NotificationSpec for v1 jobs:
+from google.cloud.aiplatform_v1.types.job_state import NotificationSpec
+from google.cloud.aiplatform_v1.types.io import GcsDestination, GcsSource
+from google.cloud.aiplatform_v1.types.machine_resources import MachineSpec, BatchDedicatedResources
+
+
+from typing import Dict, Any, List
+import base64 # For local testing Pub/Sub message encoding
+
+# Import components from our project structure
+from src.common.config import MONITORED_REGIONS, GCS_BUCKET_NAME
+from src.firms_data_retriever.retriever import FirmsDataRetriever
+from src.satellite_imagery_acquirer.acquirer import SatelliteImageryAcquirer
+
+# --- Configuration Constants ---
+GCS_BATCH_INPUT_DIR = "vertex_ai_batch_inputs/"
+GCS_BATCH_OUTPUT_DIR_PREFIX = "vertex_ai_batch_outputs/"
+
+logger = logging.getLogger(__name__) # Standard logger
 
 def _log_json(severity: str, message: str, **kwargs):
-    """
-    Helper to log structured JSON messages to stdout, which GCP Cloud Logging
-    can ingest as structured logs.
-    """
     log_entry = {
-        "severity": severity.upper(), # Ensure uppercase for GCP severity levels
+        "severity": severity.upper(),
         "message": message,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "component": "FirmsDataRetriever",
+        "timestamp": datetime.now(dt_timezone.utc).isoformat(),
+        "component": "PipelineInitiatorCF",
         **kwargs
     }
-    print(log_entry)
+    print(json.dumps(log_entry))
 
 
-class FirmsDataRetriever:
+def _get_vertex_ai_model_resource_name(model_display_name: str, project_id: str, location: str) -> str:
     """
-    Component 1: Fetches active fire data from NASA FIRMS API and filters it
-    for predefined monitored regions.
+    Retrieves the full resource name for the latest version of a Vertex AI model
+    based on its display name.
     """
+    try:
+        aiplatform.init(project=project_id, location=location) # Ensure initialized
+        models = aiplatform.Model.list(
+            filter=f'display_name="{model_display_name}"',
+            order_by="update_time desc"
+        )
+        if not models:
+            err_msg = f"Vertex AI Model with display_name '{model_display_name}' not found in project '{project_id}', region '{location}'."
+            _log_json("ERROR", err_msg, model_name=model_display_name, project_id=project_id, location=location)
+            raise ValueError(err_msg)
 
-    def __init__(self, api_key: str, base_url: str, sensors: List[str]):
-        """
-        Initializes the FIRMS data retriever.
+        latest_model = models[0]
+        _log_json("INFO", "Found Vertex AI Model.",
+                   model_display_name=model_display_name,
+                   resource_name=latest_model.resource_name,
+                   version_id=latest_model.version_id,
+                   update_time=latest_model.update_time.isoformat() if latest_model.update_time else "N/A")
+        return latest_model.resource_name
+    except Exception as e:
+        _log_json("CRITICAL", f"Failed to retrieve Vertex AI model resource name for '{model_display_name}'.",
+                   model_display_name=model_display_name, error=str(e), error_type=type(e).__name__)
+        raise
 
-        Args:
-            api_key (str): Your NASA FIRMS API key.
-            base_url (str): The base URL for the FIRMS API.
-            sensors (List[str]): List of sensor names to query (e.g., 'VIIRS_SNPP', 'VIIRS_NOAA20').
-        """
-        if not api_key:
-            _log_json("CRITICAL", "FIRMS_API_KEY environment variable not set. Cannot proceed.")
-            raise ValueError("FIRMS_API_KEY is required for FirmsDataRetriever.")
-        self.api_key = api_key
-        self.base_url = base_url
-        self.sensors = sensors
-        _log_json("INFO", "FirmsDataRetriever initialized.", sensors=self.sensors)
 
-    def _fetch_firms_data(self, sensor: str) -> Optional[pd.DataFrame]:
-        """
-        Fetches FIRMS data for a specific sensor for the last 24 hours.
+# Main Cloud Function entry point
+def pipeline_initiator_cloud_function(event: Dict, context: Dict):
+    _log_json("INFO", "Pipeline Initiator Cloud Function triggered.",
+               event_id=context.event_id if hasattr(context, 'event_id') else 'N/A',
+               event_type=context.event_type if hasattr(context, 'event_type') else 'N/A',
+               trigger_resource=context.resource.get("name") if hasattr(context, 'resource') and isinstance(context.resource, dict) else str(getattr(context, 'resource', 'N/A')),
+               timestamp=context.timestamp if hasattr(context, 'timestamp') else 'N/A')
 
-        Args:
-            sensor (str): The FIRMS sensor name (e.g., 'VIIRS_SNPP').
+    gcp_project_id = os.environ.get("GCP_PROJECT_ID")
+    gcp_region = os.environ.get("GCP_REGION")
+    firms_api_key = os.environ.get("FIRMS_API_KEY")
+    vertex_ai_model_name = os.environ.get("VERTEX_AI_MODEL_NAME", "dummy_wildfire_detector_v1")
+    vertex_notification_pubsub_topic_name = os.environ.get("VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME")
 
-        Returns:
-            Optional[pd.DataFrame]: DataFrame containing raw FIRMS data, or None if fetch fails or no data.
-        """
-        # Using "WORLD" for country to get global data, then filter by bbox.
-        # "24h" for last 24 hours (NRT - Near Real-Time data).
-        endpoint = f"{self.base_url}{self.api_key}/{sensor}/WORLD/24h"
-        _log_json("INFO", "Attempting to fetch FIRMS data.", sensor=sensor, endpoint=endpoint)
-
-        try:
-            response = requests.get(endpoint, timeout=30)
-            response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
-
-            # FIRMS returns CSV. Check if content is empty or an error message indicating API issue.
-            if not response.text.strip():
-                _log_json("WARNING", "No data returned from FIRMS API for query.", sensor=sensor, endpoint=endpoint)
-                return None
-            if "Incorrect API Key" in response.text or "Error" in response.text or "Access Denied" in response.text:
-                _log_json("ERROR", "FIRMS API returned an error message.",
-                          api_response_snippet=response.text[:200], status_code=response.status_code, sensor=sensor)
-                return None
-
-            # Use StringIO to read the string content as if it were a file
-            df = pd.read_csv(pd.io.common.StringIO(response.text))
-            _log_json("INFO", "Successfully fetched FIRMS data for sensor.", sensor=sensor, rows_fetched=len(df))
-            return df
-        except requests.exceptions.HTTPError as e:
-            _log_json("ERROR", "HTTP error fetching FIRMS data.",
-                      error=str(e), status_code=e.response.status_code if e.response else 'N/A', sensor=sensor)
-            return None
-        except requests.exceptions.ConnectionError as e:
-            _log_json("ERROR", "Connection error fetching FIRMS data.", error=str(e), sensor=sensor)
-            return None
-        except requests.exceptions.Timeout as e:
-            _log_json("ERROR", "Timeout fetching FIRMS data.", error=str(e), sensor=sensor)
-            return None
-        except requests.exceptions.RequestException as e:
-            _log_json("ERROR", "An unexpected requests error occurred.", error=str(e), sensor=sensor)
-            return None
-        except pd.errors.EmptyDataError:
-            _log_json("WARNING", "FIRMS CSV data is empty or malformed for this sensor/date. No data to parse.", sensor=sensor)
-            return None
-        except Exception as e:
-            _log_json("ERROR", "An unexpected error occurred during data fetch or parsing.", error=str(e), sensor=sensor)
-            return None
-
-    def get_and_filter_firms_data(self, monitored_regions: List[Dict[str, Any]]) -> pd.DataFrame:
-        """
-        Fetches FIRMS data for all specified sensors for the last 24 hours
-        and filters it by the provided monitored regions.
-
-        Args:
-            monitored_regions (List[Dict[str, Any]]): List of region dictionaries,
-                                                    each with 'id' and 'bbox'.
-
-        Returns:
-            pd.DataFrame: A DataFrame containing combined and filtered FIRMS data.
-                          Includes 'monitored_region_id' column.
-                          Returns an empty DataFrame if no data is found or errors occur.
-        """
-        all_firms_data = []
-
-        for sensor in self.sensors:
-            df_sensor = self._fetch_firms_data(sensor)
-            if df_sensor is not None and not df_sensor.empty:
-                all_firms_data.append(df_sensor)
-
-        if not all_firms_data:
-            _log_json("WARNING", "No FIRMS data retrieved from any sensor after attempts.")
-            return pd.DataFrame(columns=[
-                'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
-                'frp', 'daynight', 'satellite', 'monitored_region_id'
-            ])
-
-        # Concatenate data from all successful sensor fetches
-        combined_df = pd.concat(all_firms_data, ignore_index=True)
-        initial_rows = len(combined_df)
-        _log_json("INFO", "Combined raw FIRMS data from all sensors.", total_hotspots_before_filter=initial_rows)
-
-        # Ensure required columns exist, fill missing with None or a default if critical
-        required_cols = [
-            'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
-            'frp', 'daynight', 'satellite'
+    if not all([gcp_project_id, gcp_region, firms_api_key, vertex_ai_model_name, GCS_BUCKET_NAME, vertex_notification_pubsub_topic_name]):
+        missing_vars = [
+            var for var, val in {
+                "GCP_PROJECT_ID": gcp_project_id, "GCP_REGION": gcp_region,
+                "FIRMS_API_KEY": firms_api_key, "VERTEX_AI_MODEL_NAME": vertex_ai_model_name,
+                "GCS_BUCKET_NAME (from config)": GCS_BUCKET_NAME,
+                "VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME": vertex_notification_pubsub_topic_name
+            }.items() if not val
         ]
-        for col in required_cols:
-            if col not in combined_df.columns:
-                _log_json("WARNING", f"Missing expected column in FIRMS data: {col}. Adding with None.", column=col)
-                combined_df[col] = None
+        _log_json("CRITICAL", "Missing one or more required environment variables or configurations. Cannot proceed.",
+                   missing_variables=missing_vars)
+        raise ValueError(f"Missing required configurations: {', '.join(missing_vars)}")
 
-        # Filter by confidence level (e.g., only 'high' or 'nominal' confidence for VIIRS data)
-        # FIRMS documentation indicates VIIRS confidence is typically 'high' or 'nominal'.
-        if 'confidence' in combined_df.columns:
-            # Convert 'confidence' to string and lowercase for robust filtering
-            combined_df['confidence'] = combined_df['confidence'].astype(str).str.lower()
-            filtered_by_confidence_df = combined_df[
-                combined_df['confidence'].isin(['high', 'nominal'])
-            ].copy() # Use .copy() to avoid SettingWithCopyWarning
-            _log_json("INFO", "Filtered FIRMS data by confidence ('high' or 'nominal').",
-                      original_rows_before_confidence_filter=initial_rows,
-                      rows_after_confidence_filter=len(filtered_by_confidence_df))
-        else:
-            _log_json("WARNING", "No 'confidence' column found in FIRMS data. Skipping confidence filter.")
-            filtered_by_confidence_df = combined_df.copy()
+    _log_json("INFO", "Environment variables and configurations loaded successfully.",
+               project_id=gcp_project_id, region=gcp_region,
+               gcs_bucket=GCS_BUCKET_NAME, model_name=vertex_ai_model_name,
+               firms_key_present=bool(firms_api_key),
+               notification_topic_name=vertex_notification_pubsub_topic_name)
 
-        if filtered_by_confidence_df.empty:
-            _log_json("INFO", "No FIRMS hotspots with 'high' or 'nominal' confidence found after initial fetch.")
-            return pd.DataFrame(columns=[
-                'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
-                'frp', 'daynight', 'satellite', 'monitored_region_id'
-            ])
-
-        filtered_hotspots_by_region = []
-        for region in monitored_regions:
-            region_id = region["id"]
-            min_lon, min_lat, max_lon, max_lat = region["bbox"]
-
-            # Filter data points within the current region's bounding box
-            region_df = filtered_by_confidence_df[
-                (pd.to_numeric(filtered_by_confidence_df['latitude'], errors='coerce') >= min_lat) &
-                (pd.to_numeric(filtered_by_confidence_df['latitude'], errors='coerce') <= max_lat) &
-                (pd.to_numeric(filtered_by_confidence_df['longitude'], errors='coerce') >= min_lon) &
-                (pd.to_numeric(filtered_by_confidence_df['longitude'], errors='coerce') <= max_lon)
-            ].copy()
-
-            if not region_df.empty:
-                region_df['monitored_region_id'] = region_id
-                filtered_hotspots_by_region.append(region_df)
-                _log_json("INFO", "Found FIRMS hotspots in monitored region.", region_id=region_id, count=len(region_df))
-            else:
-                _log_json("INFO", "No FIRMS hotspots found in monitored region.", region_id=region_id)
-
-        if not filtered_hotspots_by_region:
-            _log_json("INFO", "No FIRMS hotspots found across all monitored regions after spatial filtering.")
-            return pd.DataFrame(columns=[
-                'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
-                'frp', 'daynight', 'satellite', 'monitored_region_id'
-            ])
-
-        final_df = pd.concat(filtered_hotspots_by_region, ignore_index=True)
-
-        # Select and reorder columns as per the defined schema for output
-        output_columns = [
-            'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
-            'frp', 'daynight', 'satellite', 'monitored_region_id'
-        ]
-        # Ensure all output_columns exist; if not, they will be created as NaN/None when reindexing
-        for col in output_columns:
-            if col not in final_df.columns:
-                final_df[col] = None # Or np.nan for numeric columns
-
-        final_df = final_df[output_columns]
-
-
-        # Ensure correct data types (using errors='coerce' to turn unparseable values into NaN)
-        final_df['latitude'] = pd.to_numeric(final_df['latitude'], errors='coerce')
-        final_df['longitude'] = pd.to_numeric(final_df['longitude'], errors='coerce')
-        final_df['frp'] = pd.to_numeric(final_df['frp'], errors='coerce')
-        # Convert acquisition date to YYYY-MM-DD string format
-        final_df['acq_date'] = pd.to_datetime(final_df['acq_date'], errors='coerce').dt.strftime('%Y-%m-%d')
-        # acq_time is typically already a string HHMM, ensure it stays string
-        final_df['acq_time'] = final_df['acq_time'].astype(str)
-        final_df['confidence'] = final_df['confidence'].astype(str)
-        final_df['daynight'] = final_df['daynight'].astype(str)
-        final_df['satellite'] = final_df['satellite'].astype(str)
-        final_df['monitored_region_id'] = final_df['monitored_region_id'].astype(str)
-
-
-        _log_json("INFO", "FIRMS data retrieval and filtering complete.",
-                  total_filtered_hotspots=len(final_df))
-        return final_df
-
-# --- Example Usage (for local testing) ---
-if __name__ == "__main__":
-    # Simulate environment variable for testing purposes
-    # In a real Cloud Function, this would be provided by GCP.
-    if "FIRMS_API_KEY" not in os.environ:
-        print("Please set the FIRMS_API_KEY environment variable for local testing.")
-        # For demonstration, setting a dummy key if not present.
-        # In a production Cloud Function, if the key is missing, it should fail early.
-        os.environ["FIRMS_API_KEY"] = "YOUR_DUMMY_KEY_FOR_LOCAL_TESTING"
-        _log_json("WARNING", "Using dummy FIRMS_API_KEY for local testing. Set actual key for production.")
+    target_date_for_data = datetime.now(dt_timezone.utc) - timedelta(days=1)
+    acquisition_date_str = target_date_for_data.strftime('%Y-%m-%d')
+    _log_json("INFO", f"Target acquisition date for FIRMS and Satellite Imagery: {acquisition_date_str}")
 
     try:
+        storage_client = storage.Client(project=gcp_project_id)
+        aiplatform.init(project=gcp_project_id, location=gcp_region)
+
+        _log_json("INFO", "Initiating FIRMS data retrieval.")
         firms_retriever = FirmsDataRetriever(
-            api_key=FIRMS_API_KEY,
-            base_url=FIRMS_API_BASE_URL,
-            sensors=FIRMS_SENSORS
+            api_key=firms_api_key,
+            base_url="https://firms.modaps.eosdis.nasa.gov/api/area/csv/",
+            sensors=["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT"]
+        )
+        firms_hotspots_df = firms_retriever.get_and_filter_firms_data(MONITORED_REGIONS)
+        _log_json("INFO", "FIRMS data retrieval complete.", firms_hotspots_count=len(firms_hotspots_df))
+
+        _log_json("INFO", "Initiating satellite imagery acquisition (GEE export tasks).")
+        imagery_acquirer = SatelliteImageryAcquirer(gcs_bucket_name=GCS_BUCKET_NAME)
+        gcs_image_uris_by_region_id: Dict[str, str] = imagery_acquirer.acquire_and_export_imagery(
+            MONITORED_REGIONS, acquisition_date=acquisition_date_str
+        )
+        _log_json("INFO", "Satellite imagery GEE export tasks initiation complete.",
+                           image_tasks_initiated_count=len(gcs_image_uris_by_region_id))
+
+        if not gcs_image_uris_by_region_id:
+            _log_json("WARNING", "No satellite imagery export tasks were initiated. Skipping Vertex AI Batch Prediction.")
+            return
+
+        _log_json("INFO", "Preparing Vertex AI Batch Prediction input file (JSONL).")
+        batch_input_instances: List[Dict[str, Any]] = []
+        for region_id, gcs_image_uri in gcs_image_uris_by_region_id.items():
+            region_metadata = next((r for r in MONITORED_REGIONS if r["id"] == region_id), None)
+            if not region_metadata:
+                _log_json("WARNING", f"Metadata for region_id '{region_id}' not found. Skipping instance.",
+                                   region_id_from_imagery=region_id)
+                continue
+            region_firms_count = 0
+            if not firms_hotspots_df.empty and 'monitored_region_id' in firms_hotspots_df.columns:
+                region_firms_count = firms_hotspots_df[
+                    firms_hotspots_df['monitored_region_id'] == region_id
+                ].shape[0]
+            instance_id = f"{region_id}_{acquisition_date_str.replace('-', '')}"
+            batch_input_instances.append({
+                "instance_id": instance_id,
+                "gcs_image_uri": gcs_image_uri,
+                "region_metadata": region_metadata,
+                "firms_hotspot_count_in_region": region_firms_count
+            })
+
+        if not batch_input_instances:
+            _log_json("WARNING", "No valid instances prepared for Vertex AI Batch Prediction. Exiting.")
+            return
+
+        timestamp_str = datetime.now(dt_timezone.utc).strftime('%Y%m%d%H%M%S%f')
+        input_filename = f"batch_input_{acquisition_date_str.replace('-', '')}_{timestamp_str}.jsonl"
+        input_gcs_path_in_bucket = f"{GCS_BATCH_INPUT_DIR}{input_filename}"
+        input_gcs_uri = f"gs://{GCS_BUCKET_NAME}/{input_gcs_path_in_bucket}"
+
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(input_gcs_path_in_bucket)
+        jsonl_content = "\n".join([json.dumps(instance) for instance in batch_input_instances])
+        blob.upload_from_string(jsonl_content, content_type="application/jsonl", timeout=60)
+        _log_json("INFO", "Vertex AI Batch Prediction input file uploaded to GCS.",
+                           input_gcs_uri=input_gcs_uri, num_instances=len(batch_input_instances))
+
+        _log_json("INFO", "Constructing and submitting Vertex AI Batch Prediction job with notification config.")
+        model_resource_name = _get_vertex_ai_model_resource_name(vertex_ai_model_name, gcp_project_id, gcp_region)
+        batch_job_output_gcs_prefix = f"gs://{GCS_BUCKET_NAME}/{GCS_BATCH_OUTPUT_DIR_PREFIX}"
+        job_display_name = f"wildfire_detection_batch_{acquisition_date_str.replace('-', '')}_{timestamp_str}"
+        pubsub_topic_resource_name = f"projects/{gcp_project_id}/topics/{vertex_notification_pubsub_topic_name}"
+
+        # Use the directly imported types
+        notification_config = NotificationSpec(
+            pubsub_topic_name=pubsub_topic_resource_name,
         )
 
-        _log_json("INFO", "Starting FIRMS data retrieval and filtering process...")
-        filtered_firms_data = firms_retriever.get_and_filter_firms_data(MONITORED_REGIONS)
+        input_config = BatchPredictionJob.InputConfig( # BatchPredictionJob was directly imported
+            instances_format="jsonl",
+            gcs_source=GcsSource(uris=[input_gcs_uri]) # GcsSource was directly imported
+        )
 
-        _log_json("INFO", "Filtered FIRMS Hotspots Data (first 5 rows):")
-        print(filtered_firms_data.head())
-        _log_json("INFO", f"Total filtered hotspots: {len(filtered_firms_data)}")
+        output_config = BatchPredictionJob.OutputConfig( # BatchPredictionJob was directly imported
+            predictions_format="jsonl",
+            gcs_destination=GcsDestination(output_uri_prefix=batch_job_output_gcs_prefix) # GcsDestination was directly imported
+        )
 
-        # Example: Group by monitored_region_id and count hotspots
-        if not filtered_firms_data.empty:
-            hotspots_by_region = filtered_firms_data.groupby('monitored_region_id').size().reset_index(name='hotspot_count')
-            _log_json("INFO", "Hotspots per Monitored Region:")
-            print(hotspots_by_region)
-        else:
-            _log_json("INFO", "No hotspots to group by region.")
+        machine_spec = MachineSpec(machine_type="n1-standard-4") # MachineSpec was directly imported
+        dedicated_resources = BatchDedicatedResources( # BatchDedicatedResources was directly imported
+            machine_spec=machine_spec,
+            starting_replica_count=1,
+            max_replica_count=5
+        )
 
-    except ValueError as e:
-        _log_json("ERROR", f"Configuration Error: {e}")
+        batch_prediction_job_resource = BatchPredictionJob( # BatchPredictionJob was directly imported
+            display_name=job_display_name,
+            model=model_resource_name,
+            input_config=input_config,
+            output_config=output_config,
+            dedicated_resources=dedicated_resources,
+            service_account=f"fire-app-vm-service-account@{gcp_project_id}.iam.gserviceaccount.com",
+            notification_spec=notification_config, # NotificationSpec was directly imported
+        )
+
+        client_options = {"api_endpoint": f"{gcp_region}-aiplatform.googleapis.com"}
+        job_service_client = JobServiceClient(client_options=client_options) # Client from _v1.services
+        parent_path = f"projects/{gcp_project_id}/locations/{gcp_region}"
+
+        created_job_response = job_service_client.create_batch_prediction_job(
+            parent=parent_path,
+            batch_prediction_job=batch_prediction_job_resource
+        )
+
+        _log_json("INFO", "Vertex AI Batch Prediction job creation request sent successfully.",
+                           job_display_name=created_job_response.display_name,
+                           job_resource_name=created_job_response.name,
+                           job_state=str(created_job_response.state))
+
+    except ValueError as ve:
+        _log_json("CRITICAL", f"A configuration or validation error occurred: {str(ve)}", error_type=type(ve).__name__)
+        raise
     except Exception as e:
-        _log_json("CRITICAL", "An unhandled error occurred during FIRMS data processing example.", error=str(e))
+        _log_json("CRITICAL", "An unhandled error occurred during pipeline initiation.",
+                   error=str(e), error_type=type(e).__name__)
+        import traceback
+        _log_json("ERROR", "Traceback:", traceback_details=traceback.format_exc())
+        raise e
+
+    _log_json("INFO", "Pipeline Initiator Cloud Function execution finished.")
+
+
+if __name__ == "__main__":
+    print("--- Running local test for Pipeline Initiator Cloud Function ---")
+
+    os.environ["GCP_PROJECT_ID"] = "haryo-kebakaran"
+    os.environ["GCP_REGION"] = "asia-southeast2"
+    os.environ["FIRMS_API_KEY"] = "0331973a7ee830ca7f026493faaa367a"
+    os.environ["VERTEX_AI_MODEL_NAME"] = "dummy_wildfire_detector_v1"
+    os.environ["VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME"] = "vertex-job-completion-topic"
+
+    if GCS_BUCKET_NAME == "fire-app-bucket":
+        print(f"Using configured GCS_BUCKET_NAME: {GCS_BUCKET_NAME} for local test.")
+    else:
+        print(f"ERROR: GCS_BUCKET_NAME in src/common/config.py ('{GCS_BUCKET_NAME}') might be incorrect for local test.")
+
+    print(f"Ensure the Vertex AI model '{os.environ['VERTEX_AI_MODEL_NAME']}' exists in project "
+          f"'{os.environ['GCP_PROJECT_ID']}' region '{os.environ['GCP_REGION']}'.")
+    print(f"Ensure the Pub/Sub topic '{os.environ['VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME']}' exists in project '{os.environ['GCP_PROJECT_ID']}'.")
+    print("Ensure your local environment is authenticated to GCP (e.g., `gcloud auth application-default login`).")
+    print("Ensure 'fire-app-vm-service-account' exists and has necessary roles (Vertex AI User, Storage Object Admin, Service Usage Consumer etc.).")
+    print("Ensure Google Earth Engine API is enabled for the project and the service account has 'Earth Engine Data Writer'.")
+
+    mock_event_data_str = json.dumps({"message": "Daily trigger from Cloud Scheduler - Local Test"})
+    mock_event_data_b64 = base64.b64encode(mock_event_data_str.encode('utf-8')).decode('utf-8')
+    mock_event = {"data": mock_event_data_b64}
+
+    class MockContext:
+        def __init__(self, event_id="test-event-local-initiator", timestamp=datetime.now(dt_timezone.utc).isoformat()):
+            self.event_id = event_id
+            self.timestamp = timestamp
+            self.event_type = "google.cloud.pubsub.topic.v1.messagePublished"
+            self.resource = {"name": f"projects/{os.environ['GCP_PROJECT_ID']}/topics/your-scheduler-topic", "service": "pubsub.googleapis.com"}
+
+    mock_context_obj = MockContext()
+
+    try:
+        pipeline_initiator_cloud_function(mock_event, mock_context_obj)
+        print("--- Local test of Pipeline Initiator completed. Check logs, GCS, and Vertex AI for batch job. ---")
+    except ValueError as ve:
+        print(f"--- Local test failed due to ValueError: {ve} ---")
+    except Exception as e:
+        print(f"--- Local test failed with an unexpected error: {type(e).__name__} - {e} ---")
+        import traceback
+        traceback.print_exc()
 </file>
 
-<file path="src/ml_model/fire_detection_model.py">
-# src/ml_model/fire_detection_model.py
-
-import torch
-import torch.nn as nn
-from torchvision.transforms import Compose, Resize, ToTensor, Normalize
-
-class DummyFireDetectionModel(nn.Module):
-    """
-    A dummy PyTorch model for wildfire detection.
-    For MVP, it simply acts as a placeholder and always returns a predefined "detected" state.
-    In a real scenario, this would be a trained Convolutional Neural Network (CNN).
-    """
-    def __init__(self):
-        super(DummyFireDetectionModel, self).__init__()
-        # For a real model, you'd define your layers here, e.g.:
-        # self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1)
-        # self.relu = nn.ReLU()
-        # self.pool = nn.MaxPool2d(2)
-        # self.fc = nn.Linear(..., 2) # e.g., for binary classification (fire/no-fire)
-
-        # We'll use a placeholder parameter so TorchServe finds something to load
-        self.dummy_param = nn.Parameter(torch.randn(1))
-
-    def forward(self, x):
-        """
-        Forward pass for the dummy model.
-        In a real model, x would be an image tensor, and you'd pass it through your layers.
-        For this dummy, we ignore the input and return a fixed output.
-        """
-        # For MVP, simulate a fixed output: assume fire detected with 85% confidence
-        # Real model would output logits or probabilities, e.g., torch.tensor([[0.15, 0.85]])
-        return torch.tensor([[0.15, 0.85]]) # [no_fire_prob, fire_prob]
-
-# Define a transformation pipeline that mimics what a real model would need for input.
-# This will be used in the handler's preprocess method.
-# Assuming input images are 224x224 RGB for a typical CNN.
-MODEL_INPUT_TRANSFORMS = Compose([
-    Resize((224, 224)),       # Resize to expected input size
-    ToTensor(),               # Convert PIL Image to PyTorch Tensor (HWC to CHW, 0-255 to 0-1)
-    Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # ImageNet normalization (common)
-])
-
-if __name__ == '__main__':
-    # Simple test of the dummy model
-    model = DummyFireDetectionModel()
-    dummy_input = torch.randn(1, 3, 224, 224) # Batch size 1, 3 channels, 224x224 image
-    output = model(dummy_input)
-    print("Dummy Model Output (logits/probabilities):", output)
-    # Convert logits/probabilities to predicted class (0 for no fire, 1 for fire)
-    predicted_class = torch.argmax(output, dim=1).item()
-    confidence = output.softmax(dim=1)[0][predicted_class].item()
-    print(f"Predicted Class: {'Fire' if predicted_class == 1 else 'No Fire'} (Confidence: {confidence:.2f})")
-
-    # Save a dummy state_dict for packaging
-    dummy_model_path = "dummy_fire_detection_model.pth"
-    torch.save(model.state_dict(), dummy_model_path)
-    print(f"Dummy model state_dict saved to {dummy_model_path}")
-</file>
-
-<file path="src/ml_model/register_vertex_model.py">
-# register_vertex_model.py
-from google.cloud import aiplatform
-import os
-
-PROJECT_ID = "haryo-kebakaran"
-REGION = "asia-southeast2"
-BUCKET_NAME = "fire-app-bucket"
-
-aiplatform.init(project=PROJECT_ID, location=REGION)
-
-serving_container_image_uri = f"{REGION}-docker.pkg.dev/{PROJECT_ID}/wildfire-detector-ts/wildfire-detector-ts:latest"
-artifact_uri = f"gs://{BUCKET_NAME}/models/dummy_fire_detection/"
-
-try:
-    print(f"Attempting to upload model '{PROJECT_ID}' in '{REGION}'...")
-    model = aiplatform.Model.upload(
-        display_name="dummy_wildfire_detector_v1",
-        artifact_uri=artifact_uri,
-        serving_container_image_uri=serving_container_image_uri,
-        serving_container_predict_route="/predictions/model",
-        serving_container_health_route="/ping"
-    )
-    model.wait()
-    print(f"Model uploaded successfully. Resource name: {model.resource_name}")
-    # IMPORTANT: Copy the NEW MODEL ID from the end of the 'resource_name' output.
-except Exception as e:
-    print(f"Error uploading model: {e}")
-    print("This might happen if the model with this display_name already exists.")
-    print("If it exists, check Vertex AI -> Models to get its ID, or increment version.")
-</file>
-
-<file path="src/ml_model/requirements.txt">
-# src/ml_model/requirements.txt (for both Dockerfile and .mar bundle)
-google-cloud-storage
-Pillow
-</file>
-
-<file path="cloudbuild.yaml">
-# cloudbuild.yaml
-steps:
-- name: 'gcr.io/cloud-builders/docker'
-  args: [
-    'build',
-    '-t', 'asia-southeast2-docker.pkg.dev/haryo-kebakaran/wildfire-detector-ts/wildfire-detector-ts:latest',
-    '-f', 'src/ml_model/Dockerfile', # Path to your Dockerfile from project root
-    '.'  # Build context is the project root (where this cloudbuild.yaml is)
-  ]
-images:
-- 'asia-southeast2-docker.pkg.dev/haryo-kebakaran/wildfire-detector-ts/wildfire-detector-ts:latest' # This ensures the image is pushed
-options:
-  machineType: 'E2_HIGHCPU_8' # Using E2_HIGHCPU_8 (8 vCPUs, 8 GB RAM)
-timeout: '1800s' # 30 minutes (should be more than enough)
-</file>
-
-<file path="requirements.txt">
+<file path="src/cloud_functions/pipeline_initiator/requirements.txt">
+# src/cloud_functions/pipeline_initiator/requirements.txt
 requests
 pandas
 google-cloud-storage
-torch==2.4.0        # Pinned to the supported version on Vertex AI
-torchvision==0.19.0 # Compatible with PyTorch 2.4.0
-torchserve==0.7.0   # TorchServe version with PyTorch 2.4 support
-torch-model-archiver==0.7.0 # Matches TorchServe version
-Pillow
+google-cloud-aiplatform
+earthengine-api # Required by SatelliteImageryAcquirer
+# Pillow # Was removed in previous step, confirming it's still removed.
 </file>
 
 <file path="src/cloud_functions/result_processor/main.py">
@@ -1223,6 +974,316 @@ Pillow # For MapVisualizer
 requests # For FirmsDataRetriever
 </file>
 
+<file path="src/common/config.py">
+# src/common/config.py
+
+"""
+Global configuration settings for the Wildfire Detection System.
+"""
+
+# Define the geographic areas to monitor for wildfires.
+# Each region is a dictionary with:
+# - 'id': A unique identifier for the region.
+# - 'name': A human-readable name for the region.
+# - 'bbox': A bounding box defined as [min_longitude, min_latitude, max_longitude, max_latitude].
+# - 'description': A brief description of the region.
+MONITORED_REGIONS = [
+    {
+        "id": "california_central",
+        "name": "Central California Wildfire Zone",
+        "bbox": [-122.0, 36.0, -118.0, 38.0],  # [min_lon, min_lat, max_lon, max_lat]
+        "description": "A test region in Central California prone to wildfires."
+    },
+    {
+        "id": "australia_southeast",
+        "name": "Southeast Australia Bushfire Zone",
+        "bbox": [140.0, -38.0, 153.0, -28.0],
+        "description": "A test region in Southeast Australia."
+    }
+    # Add more regions as needed
+]
+
+# Your Google Cloud Storage bucket name.
+# This bucket will be used to store raw data, processed outputs (maps, metadata),
+# and Vertex AI batch prediction inputs/outputs.
+GCS_BUCKET_NAME = "fire-app-bucket" # Updated to your specified bucket name
+</file>
+
+<file path="src/firms_data_retriever/retriever.py">
+# src/firms_data_retriever/retriever.py
+
+import os
+import logging
+import requests # Make sure this import is present
+import pandas as pd
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+import json # For _log_json helper
+
+# Import MONITORED_REGIONS from the common config file
+from src.common.config import MONITORED_REGIONS
+
+# --- Configuration ---
+FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
+# Use the /api/area/ endpoint which works with the MAP KEY
+FIRMS_API_BASE_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
+
+# Use sensor names compatible with the /api/area/ endpoint (and that worked in manual tests)
+FIRMS_SENSORS = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT"]
+
+# --- Logging Setup ---
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s') # Basic config
+logger = logging.getLogger(__name__) # Standard logger
+
+def _log_json(severity: str, message: str, **kwargs):
+    """
+    Helper to log structured JSON messages to stdout, which GCP Cloud Logging
+    can ingest as structured logs.
+    """
+    log_entry = {
+        "severity": severity.upper(),
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "component": "FirmsDataRetriever",
+        **kwargs
+    }
+    # In Cloud Functions, print() goes to Cloud Logging.
+    # For local, it goes to console. json.dumps ensures it's a single line JSON string.
+    print(json.dumps(log_entry))
+
+
+class FirmsDataRetriever:
+    """
+    Component 1: Fetches active fire data from NASA FIRMS API (using /api/area/)
+    and filters it for predefined monitored regions.
+    """
+
+    def __init__(self, api_key: str, base_url: str, sensors: List[str]):
+        """
+        Initializes the FIRMS data retriever.
+        """
+        if not api_key:
+            _log_json("CRITICAL", "FIRMS_API_KEY environment variable not set. Cannot proceed.")
+            raise ValueError("FIRMS_API_KEY is required for FirmsDataRetriever.")
+        self.api_key = api_key
+        self.base_url = base_url # This will be https://firms.modaps.eosdis.nasa.gov/api/area/csv/
+        self.sensors = sensors
+        _log_json("INFO", "FirmsDataRetriever initialized.", sensors=self.sensors, base_url=self.base_url)
+
+    def _fetch_firms_data(self, sensor: str) -> Optional[pd.DataFrame]:
+        """
+        Fetches FIRMS data for a specific sensor for the last 24 hours (yesterday's data).
+        Uses the /api/area/ endpoint.
+        """
+        # For "last 24 hours" using the /api/area/ endpoint:
+        # We need yesterday's date and a day_range of 1.
+        yesterday = datetime.utcnow() - timedelta(days=1)
+        date_str = yesterday.strftime('%Y-%m-%d')
+        day_range = "1"  # For one day of data ending on date_str
+
+        # The base_url is "https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
+        # Endpoint structure for /api/area/ is: /<KEY>/<SOURCE>/<AREA>/<DAY_RANGE>/<DATE>
+        # Using lowercase "world" as per your working manual test.
+        endpoint = f"{self.base_url}{self.api_key}/{sensor}/world/{day_range}/{date_str}"
+        _log_json("INFO", "Attempting to fetch FIRMS data using /api/area/.",
+                  sensor=sensor, date_for_data=date_str, endpoint=endpoint)
+
+        try:
+            response = requests.get(endpoint, timeout=30)
+
+            # Check for "Invalid API call" specifically, as this endpoint might return it directly in body
+            if "Invalid API call" in response.text:
+                _log_json("ERROR", "FIRMS API (/api/area/) returned 'Invalid API call'. Check API key, sensor name, or endpoint structure.",
+                          api_response_snippet=response.text[:200], status_code=response.status_code, sensor=sensor, endpoint=endpoint)
+                return None
+
+            response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
+
+            # FIRMS /api/area/ might return "No fire data found for the specified query." as plain text
+            # with a 200 OK status.
+            if not response.text.strip() or response.text.startswith("No fire data found"):
+                _log_json("WARNING", "No fire data found or empty response from FIRMS API for query.",
+                          sensor=sensor, endpoint=endpoint, response_text_snippet=response.text[:100])
+                return None # Return empty DataFrame later, or None here is also fine if handled by caller.
+
+            # Other error messages in body (less likely if status is 200, but good to keep)
+            if "Error" in response.text or "Access Denied" in response.text: # Unlikely with 200 OK
+                _log_json("ERROR", "FIRMS API returned an error message in response body despite 200 OK.",
+                          api_response_snippet=response.text[:200], status_code=response.status_code, sensor=sensor)
+                return None
+
+            df = pd.read_csv(pd.io.common.StringIO(response.text))
+            _log_json("INFO", "Successfully fetched FIRMS data for sensor using /api/area/.",
+                      sensor=sensor, rows_fetched=len(df))
+            return df
+        except requests.exceptions.HTTPError as e:
+            _log_json("ERROR", "HTTP error fetching FIRMS data (/api/area/).",
+                      error=str(e), status_code=e.response.status_code if e.response else 'N/A', sensor=sensor)
+            return None
+        except requests.exceptions.ConnectionError as e:
+            _log_json("ERROR", "Connection error fetching FIRMS data (/api/area/).", error=str(e), sensor=sensor)
+            return None
+        except requests.exceptions.Timeout as e:
+            _log_json("ERROR", "Timeout fetching FIRMS data (/api/area/).", error=str(e), sensor=sensor)
+            return None
+        except requests.exceptions.RequestException as e: # Catch-all for other requests issues
+            _log_json("ERROR", "An unexpected requests error occurred (/api/area/).", error=str(e), sensor=sensor)
+            return None
+        except pd.errors.EmptyDataError: # Should be caught by "No fire data found" check, but as a fallback
+            _log_json("WARNING", "FIRMS CSV data is empty or malformed after successful fetch (pd.errors.EmptyDataError).", sensor=sensor)
+            return None
+        except Exception as e: # General unexpected errors
+            _log_json("ERROR", "An unexpected error occurred during FIRMS data fetch or parsing (/api/area/).",
+                      error_type=type(e).__name__, error=str(e), sensor=sensor)
+            return None
+
+    def get_and_filter_firms_data(self, monitored_regions: List[Dict[str, Any]]) -> pd.DataFrame:
+        """
+        Fetches FIRMS data for all specified sensors (for yesterday)
+        and filters it by the provided monitored regions.
+        """
+        all_firms_data = []
+
+        for sensor in self.sensors:
+            df_sensor = self._fetch_firms_data(sensor)
+            if df_sensor is not None and not df_sensor.empty:
+                all_firms_data.append(df_sensor)
+
+        empty_df_for_return = pd.DataFrame(columns=[
+            'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
+            'frp', 'daynight', 'satellite', 'monitored_region_id'
+        ])
+
+        if not all_firms_data:
+            _log_json("WARNING", "No FIRMS data retrieved from any sensor after attempts using /api/area/.")
+            return empty_df_for_return
+
+        combined_df = pd.concat(all_firms_data, ignore_index=True)
+        initial_rows = len(combined_df)
+        _log_json("INFO", "Combined raw FIRMS data from all sensors.", total_hotspots_before_filter=initial_rows)
+
+        # Column names from /api/area/ CSV are typically:
+        # latitude,longitude,brightness,scan,track,acq_date,acq_time,satellite,confidence,version,bright_t31,frp,daynight
+        # Ensure your required_cols are present.
+        required_cols = [
+            'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
+            'frp', 'daynight', 'satellite'
+        ]
+        for col in required_cols:
+            if col not in combined_df.columns:
+                _log_json("WARNING", f"Missing expected column in combined FIRMS data: {col}. Adding with None.", column=col)
+                combined_df[col] = None
+
+        if 'confidence' in combined_df.columns:
+            combined_df['confidence'] = combined_df['confidence'].astype(str).str.lower()
+            # The /api/area/ might return confidence as numeric (0-100) or string ('low', 'nominal', 'high')
+            # For simplicity with VIIRS, we'll keep the string check. If MODIS is added, this needs refinement.
+            # A more robust way for numeric: pd.to_numeric(combined_df['confidence'], errors='coerce') >= 75 (for example)
+            # Or check type: if is_numeric_dtype(combined_df['confidence']): ... else: ...
+            filtered_by_confidence_df = combined_df[
+                combined_df['confidence'].isin(['high', 'nominal']) # Keep as is for VIIRS assumption
+            ].copy()
+            _log_json("INFO", "Filtered FIRMS data by confidence ('high' or 'nominal').",
+                      original_rows_before_confidence_filter=initial_rows,
+                      rows_after_confidence_filter=len(filtered_by_confidence_df))
+        else:
+            _log_json("WARNING", "No 'confidence' column found in FIRMS data. Skipping confidence filter.")
+            filtered_by_confidence_df = combined_df.copy()
+
+        if filtered_by_confidence_df.empty:
+            _log_json("INFO", "No FIRMS hotspots with 'high' or 'nominal' confidence after initial fetch /api/area/.")
+            return empty_df_for_return
+
+        filtered_hotspots_by_region = []
+        for region in monitored_regions:
+            region_id = region["id"]
+            min_lon, min_lat, max_lon, max_lat = region["bbox"]
+
+            region_df = filtered_by_confidence_df[
+                (pd.to_numeric(filtered_by_confidence_df['latitude'], errors='coerce') >= min_lat) &
+                (pd.to_numeric(filtered_by_confidence_df['latitude'], errors='coerce') <= max_lat) &
+                (pd.to_numeric(filtered_by_confidence_df['longitude'], errors='coerce') >= min_lon) &
+                (pd.to_numeric(filtered_by_confidence_df['longitude'], errors='coerce') <= max_lon)
+            ].copy()
+
+            if not region_df.empty:
+                region_df['monitored_region_id'] = region_id
+                filtered_hotspots_by_region.append(region_df)
+                _log_json("INFO", "Found FIRMS hotspots in monitored region.", region_id=region_id, count=len(region_df))
+            else:
+                _log_json("INFO", "No FIRMS hotspots found in monitored region.", region_id=region_id)
+
+        if not filtered_hotspots_by_region:
+            _log_json("INFO", "No FIRMS hotspots found across all monitored regions after spatial filtering.")
+            return empty_df_for_return
+
+        final_df = pd.concat(filtered_hotspots_by_region, ignore_index=True)
+
+        output_columns = [
+            'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
+            'frp', 'daynight', 'satellite', 'monitored_region_id'
+        ]
+        for col in output_columns: # Ensure all output columns exist
+            if col not in final_df.columns:
+                final_df[col] = None
+
+        final_df = final_df[output_columns] # Reorder and select
+
+        # Ensure correct data types
+        final_df['latitude'] = pd.to_numeric(final_df['latitude'], errors='coerce')
+        final_df['longitude'] = pd.to_numeric(final_df['longitude'], errors='coerce')
+        final_df['frp'] = pd.to_numeric(final_df['frp'], errors='coerce')
+        final_df['acq_date'] = pd.to_datetime(final_df['acq_date'], errors='coerce').dt.strftime('%Y-%m-%d')
+        final_df['acq_time'] = final_df['acq_time'].astype(str).str.zfill(4) # Ensure HHMM format
+        final_df['confidence'] = final_df['confidence'].astype(str)
+        final_df['daynight'] = final_df['daynight'].astype(str)
+        final_df['satellite'] = final_df['satellite'].astype(str)
+        final_df['monitored_region_id'] = final_df['monitored_region_id'].astype(str)
+
+        _log_json("INFO", "FIRMS data retrieval and filtering complete using /api/area/.",
+                  total_filtered_hotspots=len(final_df))
+        return final_df
+
+# --- Example Usage (for local testing) ---
+if __name__ == "__main__":
+    if "FIRMS_API_KEY" not in os.environ:
+        print("WARNING: FIRMS_API_KEY environment variable not set for local testing.")
+        # Replace with your actual key if you want to run this block successfully
+        os.environ["FIRMS_API_KEY"] = "0331973a7ee830ca7f026493faaa367a" # Using your key for test
+        if os.environ["FIRMS_API_KEY"] == "YOUR_DUMMY_KEY_FOR_LOCAL_TESTING": # Check if it's still a dummy
+             _log_json("WARNING", "Using placeholder FIRMS_API_KEY. Local test might fail or return 'Invalid API call'.")
+
+
+    try:
+        firms_retriever = FirmsDataRetriever(
+            api_key=FIRMS_API_KEY,
+            base_url=FIRMS_API_BASE_URL, # Uses the updated /api/area/ base_url
+            sensors=FIRMS_SENSORS       # Uses the _NRT sensor names
+        )
+
+        _log_json("INFO", "Starting FIRMS data retrieval and filtering process (local test)...")
+        filtered_firms_data = firms_retriever.get_and_filter_firms_data(MONITORED_REGIONS)
+
+        _log_json("INFO", "Filtered FIRMS Hotspots Data (first 5 rows if any):")
+        print(filtered_firms_data.head().to_string())
+        _log_json("INFO", f"Total filtered hotspots: {len(filtered_firms_data)}")
+
+        if not filtered_firms_data.empty:
+            hotspots_by_region = filtered_firms_data.groupby('monitored_region_id').size().reset_index(name='hotspot_count')
+            _log_json("INFO", "Hotspots per Monitored Region:")
+            print(hotspots_by_region.to_string())
+        else:
+            _log_json("INFO", "No hotspots to group by region.")
+
+    except ValueError as e: # Config error from __init__
+        _log_json("ERROR", f"Configuration Error during local test: {e}")
+    except Exception as e:
+        _log_json("CRITICAL", "An unhandled error occurred during FIRMS local test.",
+                  error_type=type(e).__name__, error=str(e))
+        import traceback
+        traceback.print_exc()
+</file>
+
 <file path="src/map_visualizer/visualizer.py">
 # src/map_visualizer/visualizer.py
 
@@ -1590,6 +1651,111 @@ if __name__ == "__main__":
         traceback.print_exc()
 </file>
 
+<file path="src/ml_model/Dockerfile">
+FROM pytorch/pytorch:2.4.0-cuda11.8-cudnn9-runtime
+
+LABEL maintainer="Wildfire Detection Team <dev@example.com>"
+LABEL version="0.1.0"
+LABEL description="TorchServe container for Wildfire Detection AI Model"
+
+ENV PATH="/opt/conda/bin:${PATH}"
+ENV HOME="/home/model-server"
+ENV PYTHONUNBUFFERED=TRUE
+ENV TEMP_DIR_PATH="/tmp"
+
+WORKDIR ${HOME}
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends openjdk-11-jdk-headless curl wget && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir --upgrade pip
+
+COPY src/ml_model/requirements.txt .
+
+RUN pip install --no-cache-dir --default-timeout=120 --retries=3 \
+    "torchserve==0.7.0" \
+    "torch-model-archiver==0.7.0" \
+    -r requirements.txt
+
+COPY src/ml_model/fire_detection_model.py .
+COPY src/ml_model/handler.py .
+
+COPY src/ml_model/model.mar ./model_store/model.mar
+
+EXPOSE 8080
+EXPOSE 8081
+EXPOSE 8082
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
+  CMD curl -f http://localhost:8080/ping || exit 1
+
+ENTRYPOINT ["torchserve"]
+
+CMD ["--start", "--model-store", "/home/model-server/model_store", "--models", "model=model.mar"]
+</file>
+
+<file path="src/ml_model/fire_detection_model.py">
+# src/ml_model/fire_detection_model.py
+
+import torch
+import torch.nn as nn
+from torchvision.transforms import Compose, Resize, ToTensor, Normalize
+
+class DummyFireDetectionModel(nn.Module):
+    """
+    A dummy PyTorch model for wildfire detection.
+    For MVP, it simply acts as a placeholder and always returns a predefined "detected" state.
+    In a real scenario, this would be a trained Convolutional Neural Network (CNN).
+    """
+    def __init__(self):
+        super(DummyFireDetectionModel, self).__init__()
+        # For a real model, you'd define your layers here, e.g.:
+        # self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1)
+        # self.relu = nn.ReLU()
+        # self.pool = nn.MaxPool2d(2)
+        # self.fc = nn.Linear(..., 2) # e.g., for binary classification (fire/no-fire)
+
+        # We'll use a placeholder parameter so TorchServe finds something to load
+        self.dummy_param = nn.Parameter(torch.randn(1))
+
+    def forward(self, x):
+        """
+        Forward pass for the dummy model.
+        In a real model, x would be an image tensor, and you'd pass it through your layers.
+        For this dummy, we ignore the input and return a fixed output.
+        """
+        # For MVP, simulate a fixed output: assume fire detected with 85% confidence
+        # Real model would output logits or probabilities, e.g., torch.tensor([[0.15, 0.85]])
+        return torch.tensor([[0.15, 0.85]]) # [no_fire_prob, fire_prob]
+
+# Define a transformation pipeline that mimics what a real model would need for input.
+# This will be used in the handler's preprocess method.
+# Assuming input images are 224x224 RGB for a typical CNN.
+MODEL_INPUT_TRANSFORMS = Compose([
+    Resize((224, 224)),       # Resize to expected input size
+    ToTensor(),               # Convert PIL Image to PyTorch Tensor (HWC to CHW, 0-255 to 0-1)
+    Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # ImageNet normalization (common)
+])
+
+if __name__ == '__main__':
+    # Simple test of the dummy model
+    model = DummyFireDetectionModel()
+    dummy_input = torch.randn(1, 3, 224, 224) # Batch size 1, 3 channels, 224x224 image
+    output = model(dummy_input)
+    print("Dummy Model Output (logits/probabilities):", output)
+    # Convert logits/probabilities to predicted class (0 for no fire, 1 for fire)
+    predicted_class = torch.argmax(output, dim=1).item()
+    confidence = output.softmax(dim=1)[0][predicted_class].item()
+    print(f"Predicted Class: {'Fire' if predicted_class == 1 else 'No Fire'} (Confidence: {confidence:.2f})")
+
+    # Save a dummy state_dict for packaging
+    dummy_model_path = "dummy_fire_detection_model.pth"
+    torch.save(model.state_dict(), dummy_model_path)
+    print(f"Dummy model state_dict saved to {dummy_model_path}")
+</file>
+
 <file path="src/ml_model/handler.py">
 # src/ml_model/handler.py
 
@@ -1903,6 +2069,44 @@ if __name__ == '__main__':
         traceback.print_exc()
 </file>
 
+<file path="src/ml_model/register_vertex_model.py">
+# register_vertex_model.py
+from google.cloud import aiplatform
+import os
+
+PROJECT_ID = "haryo-kebakaran"
+REGION = "asia-southeast2"
+BUCKET_NAME = "fire-app-bucket"
+
+aiplatform.init(project=PROJECT_ID, location=REGION)
+
+serving_container_image_uri = f"{REGION}-docker.pkg.dev/{PROJECT_ID}/wildfire-detector-ts/wildfire-detector-ts:latest"
+artifact_uri = f"gs://{BUCKET_NAME}/models/dummy_fire_detection/"
+
+try:
+    print(f"Attempting to upload model '{PROJECT_ID}' in '{REGION}'...")
+    model = aiplatform.Model.upload(
+        display_name="dummy_wildfire_detector_v1",
+        artifact_uri=artifact_uri,
+        serving_container_image_uri=serving_container_image_uri,
+        serving_container_predict_route="/predictions/model",
+        serving_container_health_route="/ping"
+    )
+    model.wait()
+    print(f"Model uploaded successfully. Resource name: {model.resource_name}")
+    # IMPORTANT: Copy the NEW MODEL ID from the end of the 'resource_name' output.
+except Exception as e:
+    print(f"Error uploading model: {e}")
+    print("This might happen if the model with this display_name already exists.")
+    print("If it exists, check Vertex AI -> Models to get its ID, or increment version.")
+</file>
+
+<file path="src/ml_model/requirements.txt">
+# src/ml_model/requirements.txt (for both Dockerfile and .mar bundle)
+google-cloud-storage
+Pillow
+</file>
+
 <file path="src/satellite_imagery_acquirer/acquirer.py">
 # src/satellite_imagery_acquirer/acquirer.py
 
@@ -2198,352 +2402,156 @@ if __name__ == "__main__":
                   error=str(e), error_type=type(e).__name__)
 </file>
 
-<file path="src/cloud_functions/pipeline_initiator/main.py">
-# src/cloud_functions/pipeline_initiator/main.py
+<file path=".gcloudignore">
+# .gcloudignore
+.gcloudignore
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+*$py.class
+*~
+fire-venv/ # Or whatever your virtual environment folder is named
 
-import os
-import logging
-import json
-from datetime import datetime, timedelta
-from google.cloud import storage
-from google.cloud import aiplatform # Main SDK
-from google.cloud.aiplatform import gapic as aiplatform_gapic # For specific GAPIC types
-from typing import Dict, Any, List
-import base64 # For local testing Pub/Sub message encoding
-
-# Import components from our project structure
-from src.common.config import MONITORED_REGIONS, GCS_BUCKET_NAME
-from src.firms_data_retriever.retriever import FirmsDataRetriever, FIRMS_API_BASE_URL, FIRMS_SENSORS
-from src.satellite_imagery_acquirer.acquirer import SatelliteImageryAcquirer
-
-# --- Configuration Constants ---
-GCS_BATCH_INPUT_DIR = "vertex_ai_batch_inputs/"
-GCS_BATCH_OUTPUT_DIR_PREFIX = "vertex_ai_batch_outputs/"
-
-logger = logging.getLogger(__name__)
-
-def _log_json(severity: str, message: str, **kwargs):
-    log_entry = {
-        "severity": severity.upper(),
-        "message": message,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "component": "PipelineInitiatorCF",
-        **kwargs
-    }
-    print(json.dumps(log_entry))
-
-
-def _get_vertex_ai_model_resource_name(model_display_name: str, project_id: str, location: str) -> str:
-    """
-    Retrieves the full resource name for the latest version of a Vertex AI model
-    based on its display name.
-    """
-    try:
-        aiplatform.init(project=project_id, location=location)
-        models = aiplatform.Model.list(
-            filter=f'display_name="{model_display_name}"',
-            order_by="update_time desc"
-        )
-        if not models:
-            err_msg = f"Vertex AI Model with display_name '{model_display_name}' not found in project '{project_id}', region '{location}'."
-            _log_json("ERROR", err_msg, model_name=model_display_name)
-            raise ValueError(err_msg)
-        
-        latest_model = models[0]
-        _log_json("INFO", "Found Vertex AI Model.",
-                   model_display_name=model_display_name,
-                   resource_name=latest_model.resource_name,
-                   version_id=latest_model.version_id,
-                   update_time=latest_model.update_time.isoformat() if latest_model.update_time else "N/A")
-        return latest_model.resource_name
-    except Exception as e:
-        _log_json("CRITICAL", f"Failed to retrieve Vertex AI model resource name for '{model_display_name}'.",
-                   model_display_name=model_display_name, error=str(e), error_type=type(e).__name__)
-        raise
-
-
-# Main Cloud Function entry point
-def pipeline_initiator_cloud_function(event: Dict, context: Dict):
-    _log_json("INFO", "Pipeline Initiator Cloud Function triggered.",
-               event_id=context.event_id, event_type=context.event_type,
-               trigger_resource=context.resource.get("name") if isinstance(context.resource, dict) else str(context.resource),
-               timestamp=context.timestamp)
-
-    # --- 0. Configuration & Validation from Environment Variables ---
-    gcp_project_id = os.environ.get("GCP_PROJECT_ID")
-    gcp_region = os.environ.get("GCP_REGION")
-    firms_api_key = os.environ.get("FIRMS_API_KEY")
-    vertex_ai_model_name = os.environ.get("VERTEX_AI_MODEL_NAME", "dummy_wildfire_detector_v1")
-    vertex_notification_pubsub_topic_name = os.environ.get("VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME") # NEW
-
-    if not all([gcp_project_id, gcp_region, firms_api_key, vertex_ai_model_name, GCS_BUCKET_NAME, vertex_notification_pubsub_topic_name]):
-        missing_vars = [
-            var for var, val in {
-                "GCP_PROJECT_ID": gcp_project_id, "GCP_REGION": gcp_region,
-                "FIRMS_API_KEY": firms_api_key, "VERTEX_AI_MODEL_NAME": vertex_ai_model_name,
-                "GCS_BUCKET_NAME (from config)": GCS_BUCKET_NAME,
-                "VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME": vertex_notification_pubsub_topic_name
-            }.items() if not val
-        ]
-        _log_json("CRITICAL", "Missing one or more required environment variables or configurations. Cannot proceed.",
-                   missing_variables=missing_vars)
-        raise ValueError(f"Missing required configurations: {', '.join(missing_vars)}")
-
-    _log_json("INFO", "Environment variables and configurations loaded successfully.",
-               project_id=gcp_project_id, region=gcp_region,
-               gcs_bucket=GCS_BUCKET_NAME, model_name=vertex_ai_model_name,
-               firms_key_present=bool(firms_api_key),
-               notification_topic_name=vertex_notification_pubsub_topic_name)
-
-    target_date = datetime.utcnow() - timedelta(days=1)
-    acquisition_date_str = target_date.strftime('%Y-%m-%d')
-    _log_json("INFO", f"Target acquisition date for FIRMS and Satellite Imagery: {acquisition_date_str}")
-
-    try:
-        storage_client = storage.Client(project=gcp_project_id)
-        aiplatform.init(project=gcp_project_id, location=gcp_region) # Initialize SDK
-
-        _log_json("INFO", "Initiating FIRMS data retrieval.")
-        firms_retriever = FirmsDataRetriever(
-            api_key=firms_api_key,
-            base_url=FIRMS_API_BASE_URL,
-            sensors=FIRMS_SENSORS
-        )
-        firms_hotspots_df = firms_retriever.get_and_filter_firms_data(MONITORED_REGIONS)
-        _log_json("INFO", "FIRMS data retrieval complete.", firms_hotspots_count=len(firms_hotspots_df))
-
-        _log_json("INFO", "Initiating satellite imagery acquisition (GEE export tasks).")
-        imagery_acquirer = SatelliteImageryAcquirer(gcs_bucket_name=GCS_BUCKET_NAME)
-        gcs_image_uris_by_region_id: Dict[str, str] = imagery_acquirer.acquire_and_export_imagery(
-            MONITORED_REGIONS, acquisition_date=acquisition_date_str
-        )
-        _log_json("INFO", "Satellite imagery GEE export tasks initiation complete.",
-                           image_tasks_initiated_count=len(gcs_image_uris_by_region_id))
-
-        if not gcs_image_uris_by_region_id:
-            _log_json("WARNING", "No satellite imagery export tasks were initiated. Skipping Vertex AI Batch Prediction.")
-            return
-
-        _log_json("INFO", "Preparing Vertex AI Batch Prediction input file (JSONL).")
-        batch_input_instances: List[Dict[str, Any]] = []
-        for region_id, gcs_image_uri in gcs_image_uris_by_region_id.items():
-            region_metadata = next((r for r in MONITORED_REGIONS if r["id"] == region_id), None)
-            if not region_metadata:
-                _log_json("WARNING", f"Metadata for region_id '{region_id}' not found. Skipping instance.",
-                                   region_id_from_imagery=region_id)
-                continue
-            
-            region_firms_count = 0
-            if not firms_hotspots_df.empty and 'monitored_region_id' in firms_hotspots_df.columns:
-                region_firms_count = firms_hotspots_df[
-                    firms_hotspots_df['monitored_region_id'] == region_id
-                ].shape[0]
-            
-            instance_id = f"{region_id}_{acquisition_date_str.replace('-', '')}"
-            batch_input_instances.append({
-                "instance_id": instance_id,
-                "gcs_image_uri": gcs_image_uri,
-                "region_metadata": region_metadata,
-                "firms_hotspot_count_in_region": region_firms_count
-            })
-
-        if not batch_input_instances:
-            _log_json("WARNING", "No valid instances prepared for Vertex AI Batch Prediction. Exiting.")
-            return
-
-        timestamp_str = datetime.utcnow().strftime('%Y%m%d%H%M%S%f')
-        input_filename = f"batch_input_{acquisition_date_str}_{timestamp_str}.jsonl"
-        input_gcs_uri = f"gs://{GCS_BUCKET_NAME}/{GCS_BATCH_INPUT_DIR}{input_filename}"
-
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(f"{GCS_BATCH_INPUT_DIR}{input_filename}")
-        jsonl_content = "\n".join([json.dumps(instance) for instance in batch_input_instances])
-        blob.upload_from_string(jsonl_content, content_type="application/jsonl", timeout=60)
-        _log_json("INFO", "Vertex AI Batch Prediction input file uploaded to GCS.",
-                           input_gcs_uri=input_gcs_uri, num_instances=len(batch_input_instances))
-
-        # --- 4. Submit Vertex AI Batch Prediction Job using JobServiceClient ---
-        _log_json("INFO", "Constructing and submitting Vertex AI Batch Prediction job with notification config.")
-        
-        model_resource_name = _get_vertex_ai_model_resource_name(vertex_ai_model_name, gcp_project_id, gcp_region)
-        
-        batch_job_output_gcs_prefix = f"gs://{GCS_BUCKET_NAME}/{GCS_BATCH_OUTPUT_DIR_PREFIX}"
-        job_display_name = f"wildfire_detection_batch_{acquisition_date_str}_{timestamp_str}"
-
-        pubsub_topic_resource_name = f"projects/{gcp_project_id}/topics/{vertex_notification_pubsub_topic_name}"
-
-        notification_config = aiplatform_gapic.NotificationSpec(
-            pubsub_topic_name=pubsub_topic_resource_name,
-            # For BatchPredictionJob, message_type defaults to JOB_STATE_CHANGE if pubsub_topic_name is set.
-            # No need to specify message_type explicitly here unless overriding to ERRORS_ONLY.
-        )
-
-        input_config = aiplatform_gapic.BatchPredictionJob.InputConfig(
-            instances_format="jsonl",
-            gcs_source=aiplatform_gapic.GcsSource(uris=[input_gcs_uri])
-        )
-
-        output_config = aiplatform_gapic.BatchPredictionJob.OutputConfig(
-            predictions_format="jsonl",
-            gcs_destination=aiplatform_gapic.GcsDestination(output_uri_prefix=batch_job_output_gcs_prefix)
-        )
-        
-        machine_spec = aiplatform_gapic.MachineSpec(machine_type="n1-standard-4")
-        dedicated_resources = aiplatform_gapic.BatchDedicatedResources(
-            machine_spec=machine_spec,
-            starting_replica_count=1,
-            max_replica_count=5
-        )
-
-        # Construct the BatchPredictionJob GAPIC object
-        # Note: model_parameters is for passing params to the *model server*, not the job itself.
-        # If your handler needs specific parameters, you'd use model.explanation_spec.parameters for some cases,
-        # or include them in the instance data if they vary per instance.
-        # For now, assuming no specific model_parameters are needed for the dummy model.
-        batch_prediction_job_resource = aiplatform_gapic.BatchPredictionJob(
-            display_name=job_display_name,
-            model=model_resource_name,
-            input_config=input_config,
-            output_config=output_config,
-            dedicated_resources=dedicated_resources,
-            service_account="fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com", # As per Option A
-            notification_spec=notification_config,
-            # generate_explanation=False, # Default
-            # labels = {"env": "dev", "app": "wildfire_detection"}, # Optional
-        )
-        
-        # API endpoint for the region
-        api_endpoint = f"{gcp_region}-aiplatform.googleapis.com"
-        job_client = aiplatform_gapic.JobServiceClient(
-            client_options={"api_endpoint": api_endpoint}
-        )
-        
-        parent_path = f"projects/{gcp_project_id}/locations/{gcp_region}"
-        
-        created_job_response = job_client.create_batch_prediction_job(
-            parent=parent_path,
-            batch_prediction_job=batch_prediction_job_resource
-        )
-
-        _log_json("INFO", "Vertex AI Batch Prediction job creation request sent successfully.",
-                           job_display_name=created_job_response.display_name,
-                           job_resource_name=created_job_response.name,
-                           job_state=str(created_job_response.state))
-
-    except ValueError as ve:
-        _log_json("CRITICAL", f"A configuration or validation error occurred: {str(ve)}", error_type=type(ve).__name__)
-        raise
-    except Exception as e:
-        _log_json("CRITICAL", "An unhandled error occurred during pipeline initiation.",
-                   error=str(e), error_type=type(e).__name__)
-        raise e
-
-    _log_json("INFO", "Pipeline Initiator Cloud Function execution finished.")
-
-
-# --- Local Testing Entrypoint ---
-if __name__ == "__main__":
-    print("--- Running local test for Pipeline Initiator Cloud Function ---")
-
-    os.environ["GCP_PROJECT_ID"] = "your-gcp-project-id" 
-    os.environ["GCP_REGION"] = "us-central1" 
-    os.environ["FIRMS_API_KEY"] = "YOUR_ACTUAL_FIRMS_API_KEY"
-    os.environ["VERTEX_AI_MODEL_NAME"] = "dummy_wildfire_detector_v1" 
-    os.environ["VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME"] = "vertex-job-completion-topic" # For local test
-    
-    if GCS_BUCKET_NAME == "fire-app-bucket":
-        print(f"Using configured GCS_BUCKET_NAME: {GCS_BUCKET_NAME} for local test.")
-    else:
-        print(f"ERROR: GCS_BUCKET_NAME in src/common/config.py ('{GCS_BUCKET_NAME}') seems incorrect.")
-        exit(1)
-    
-    print(f"Ensure the Vertex AI model '{os.environ['VERTEX_AI_MODEL_NAME']}' exists in project "
-          f"'{os.environ['GCP_PROJECT_ID']}' region '{os.environ['GCP_REGION']}'.")
-    print(f"Ensure the Pub/Sub topic '{os.environ['VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME']}' exists in project '{os.environ['GCP_PROJECT_ID']}'.")
-    print("Ensure your local environment is authenticated to GCP (e.g., `gcloud auth application-default login`).")
-
-    mock_event_data_str = json.dumps({"message": "Daily trigger from Cloud Scheduler"})
-    mock_event_data_b64 = base64.b64encode(mock_event_data_str.encode('utf-8')).decode('utf-8')
-    mock_event = {"data": mock_event_data_b64} 
-
-    class MockContext:
-        def __init__(self, event_id, timestamp, event_type, resource_name):
-            self.event_id = event_id
-            self.timestamp = timestamp
-            self.event_type = event_type
-            self.resource = {"name": resource_name, "service": "pubsub.googleapis.com"}
-
-    mock_context_obj = MockContext(
-        event_id="test-event-local-123",
-        timestamp=datetime.utcnow().isoformat() + "Z",
-        event_type="google.cloud.pubsub.topic.v1.messagePublished",
-        resource_name=f"projects/{os.environ['GCP_PROJECT_ID']}/topics/your-scheduler-topic"
-    )
-
-    try:
-        pipeline_initiator_cloud_function(mock_event, mock_context_obj)
-        print("--- Local test of Pipeline Initiator completed. Check logs and Vertex AI for batch job. ---")
-    except ValueError as ve:
-        print(f"--- Local test failed due to ValueError: {ve} ---")
-    except Exception as e:
-        print(f"--- Local test failed with an unexpected error: {e} ---")
-        import traceback
-        traceback.print_exc()
+# Optional: Add other files/directories you don't want to deploy
+# For example, local test outputs or large data files not needed by the function
+*.test
+*.png # If you have test images at the root you don't want to deploy
+dummy_*.pth
+# node_modules/ (if you had any)
+# .vscode/
+# .idea/
 </file>
 
-<file path="src/cloud_functions/pipeline_initiator/requirements.txt">
-# src/cloud_functions/pipeline_initiator/requirements.txt
+<file path=".gitignore">
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+fire-venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+.mypy_cache/
+.vscode/
+
+# Environment Variables
+.env
+.mock_fire_state # From firms_api mock
+/tmp/ # Temporary directory used on VM and locally
+</file>
+
+<file path="cloudbuild-pipeline-initiator.yaml">
+# fire-detection-app/cloudbuild-pipeline-initiator.yaml
+steps:
+# Step 1: Create a staging directory for the function
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    mkdir -p deploy_staging/pipeline_initiator
+    cp src/cloud_functions/pipeline_initiator/main.py deploy_staging/pipeline_initiator/main.py
+    cp src/cloud_functions/pipeline_initiator/requirements.txt deploy_staging/pipeline_initiator/requirements.txt
+    # Copy the entire shared 'src' directory into the staging area for this function
+    # This makes 'from src.common...' imports work.
+    cp -r src deploy_staging/pipeline_initiator/src
+
+# Step 2: Deploy the function from the staging directory
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk' # Official Cloud SDK image
+  entrypoint: 'gcloud'
+  args:
+  - 'functions'
+  - 'deploy'
+  - 'PipelineInitiatorCF'
+  - '--gen2'
+  - '--runtime=python311'
+  - '--region=asia-southeast2'
+  - '--source=./deploy_staging/pipeline_initiator' # Source is now the prepared staging dir
+  - '--entry-point=pipeline_initiator_cloud_function'
+  - '--trigger-topic=wildfire-pipeline-initiator'
+  - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
+  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,FIRMS_API_KEY=0331973a7ee830ca7f026493faaa367a,VERTEX_AI_MODEL_NAME=dummy_wildfire_detector_v1,VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME=vertex-job-completion-topic'
+  - '--timeout=540s'
+  - '--memory=1GiB'  # <--- INCREASED MEMORY
+  - '--project=haryo-kebakaran'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  # machineType: 'E2_MEDIUM' # Optional: specify machine type for the build itself
+timeout: '1200s' # Timeout for the entire Cloud Build job (all steps)
+</file>
+
+<file path="cloudbuild-result-processor.yaml">
+# fire-detection-app/cloudbuild-result-processor.yaml
+steps:
+# Step 1: Create a staging directory for the function
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    mkdir -p deploy_staging/result_processor
+    cp src/cloud_functions/result_processor/main.py deploy_staging/result_processor/main.py
+    cp src/cloud_functions/result_processor/requirements.txt deploy_staging/result_processor/requirements.txt
+    # Copy the entire shared 'src' directory
+    cp -r src deploy_staging/result_processor/src
+
+# Step 2: Deploy the function from the staging directory
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: 'gcloud'
+  args:
+  - 'functions'
+  - 'deploy'
+  - 'ResultProcessorCF'
+  - '--gen2'
+  - '--runtime=python311'
+  - '--region=asia-southeast2'
+  - '--source=./deploy_staging/result_processor' # Source is the prepared staging dir
+  - '--entry-point=result_processor_cloud_function'
+  - '--trigger-topic=vertex-job-completion-topic'
+  - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
+  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,FIRMS_API_KEY=0331973a7ee830ca7f026493faaa367a,GCP_REGION=asia-southeast2'
+  - '--timeout=540s'
+  - '--memory=1024MB'
+  - '--project=haryo-kebakaran'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  # machineType: 'E2_MEDIUM'
+timeout: '1200s'
+</file>
+
+<file path="cloudbuild.yaml">
+# cloudbuild.yaml
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: [
+    'build',
+    '-t', 'asia-southeast2-docker.pkg.dev/haryo-kebakaran/wildfire-detector-ts/wildfire-detector-ts:latest',
+    '-f', 'src/ml_model/Dockerfile', # Path to your Dockerfile from project root
+    '.'  # Build context is the project root (where this cloudbuild.yaml is)
+  ]
+images:
+- 'asia-southeast2-docker.pkg.dev/haryo-kebakaran/wildfire-detector-ts/wildfire-detector-ts:latest' # This ensures the image is pushed
+options:
+  machineType: 'E2_HIGHCPU_8' # Using E2_HIGHCPU_8 (8 vCPUs, 8 GB RAM)
+timeout: '1800s' # 30 minutes (should be more than enough)
+</file>
+
+<file path="requirements.txt">
 requests
 pandas
 google-cloud-storage
-google-cloud-aiplatform
-earthengine-api # Required by SatelliteImageryAcquirer
-# Pillow # Was removed in previous step, confirming it's still removed.
-</file>
-
-<file path="src/ml_model/Dockerfile">
-FROM pytorch/pytorch:2.4.0-cuda11.8-cudnn9-runtime
-
-LABEL maintainer="Wildfire Detection Team <dev@example.com>"
-LABEL version="0.1.0"
-LABEL description="TorchServe container for Wildfire Detection AI Model"
-
-ENV PATH="/opt/conda/bin:${PATH}"
-ENV HOME="/home/model-server"
-ENV PYTHONUNBUFFERED=TRUE
-ENV TEMP_DIR_PATH="/tmp"
-
-WORKDIR ${HOME}
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends openjdk-11-jdk-headless curl wget && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN pip install --no-cache-dir --upgrade pip
-
-COPY src/ml_model/requirements.txt .
-
-RUN pip install --no-cache-dir --default-timeout=120 --retries=3 \
-    "torchserve==0.7.0" \
-    "torch-model-archiver==0.7.0" \
-    -r requirements.txt
-
-COPY src/ml_model/fire_detection_model.py .
-COPY src/ml_model/handler.py .
-
-COPY src/ml_model/model.mar ./model_store/model.mar
-
-EXPOSE 8080
-EXPOSE 8081
-EXPOSE 8082
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
-  CMD curl -f http://localhost:8080/ping || exit 1
-
-ENTRYPOINT ["torchserve"]
-
-CMD ["--start", "--model-store", "/home/model-server/model_store", "--models", "model=model.mar"]
+torch==2.4.0        # Pinned to the supported version on Vertex AI
+torchvision==0.19.0 # Compatible with PyTorch 2.4.0
+torchserve==0.7.0   # TorchServe version with PyTorch 2.4 support
+torch-model-archiver==0.7.0 # Matches TorchServe version
+Pillow
 </file>
 
 </files>
