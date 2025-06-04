@@ -17,3 +17,5 @@ fire-venv/
 .env
 .mock_fire_state # From firms_api mock
 /tmp/ # Temporary directory used on VM and locally
+repomix-output.xml
+
