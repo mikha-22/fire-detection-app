@@ -23,7 +23,7 @@ GCS_IMAGE_OUTPUT_PREFIX = "raw_satellite_imagery/"
 # Sentinel-2 Level-2A is a good choice for visible light imagery
 # with atmospheric correction.
 # See: https://developers.google.com/earth-engine/datasets/catalog/COPERNICUS_S2_SR
-SENTINEL2_COLLECTION = "COPERNICUS/S2_SR" # Surface Reflectance
+SENTINEL2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED" # Surface Reflectance
 CLOUD_COVER_THRESHOLD = 20 # Max percentage of cloud cover allowed
 
 # --- Logging Setup ---
