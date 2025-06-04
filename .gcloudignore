@@ -6,7 +6,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 *~
-fire-venv/ # Or whatever your virtual environment folder is named
+fire-venv/
+fire-venv
+
+# Or whatever your virtual environment folder is named  <--- THIS IS KEY
 
 # Optional: Add other files/directories you don't want to deploy
 # For example, local test outputs or large data files not needed by the function

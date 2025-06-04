@@ -1,8 +1,8 @@
 requests
 pandas
 google-cloud-storage
-torch==2.4.0        # Pinned to the supported version on Vertex AI
-torchvision==0.19.0 # Compatible with PyTorch 2.4.0
-torchserve==0.7.0   # TorchServe version with PyTorch 2.4 support
-torch-model-archiver==0.7.0 # Matches TorchServe version
+torch
+torchvision
+torchserve
+torch-model-archiver
 Pillow

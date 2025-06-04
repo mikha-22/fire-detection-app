@@ -1,5 +1,6 @@
 # src/ml_model/fire_detection_model.py
 
+import os # Added os import for path joining
 import torch
 import torch.nn as nn
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
@@ -51,7 +52,14 @@ if __name__ == '__main__':
     confidence = output.softmax(dim=1)[0][predicted_class].item()
     print(f"Predicted Class: {'Fire' if predicted_class == 1 else 'No Fire'} (Confidence: {confidence:.2f})")
 
-    # Save a dummy state_dict for packaging
-    dummy_model_path = "dummy_fire_detection_model.pth"
-    torch.save(model.state_dict(), dummy_model_path)
-    print(f"Dummy model state_dict saved to {dummy_model_path}")
+    # --- MODIFIED SAVE LOGIC ---
+    # Save a dummy state_dict for packaging, named 'model.pth'
+    # and place it directly within the 'src/ml_model/' directory.
+    model_filename = "model.pth"
+    # Get the directory where this script (fire_detection_model.py) is located
+    current_script_directory = os.path.dirname(os.path.abspath(__file__))
+    save_path = os.path.join(current_script_directory, model_filename)
+    
+    torch.save(model.state_dict(), save_path)
+    print(f"Dummy model state_dict saved to {save_path}")
+    # --- END MODIFIED SAVE LOGIC ---
