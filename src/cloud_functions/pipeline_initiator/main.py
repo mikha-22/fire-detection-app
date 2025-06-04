@@ -49,12 +49,10 @@ def _get_vertex_ai_model_resource_name(model_display_name: str, project_id: str,
     based on its display name.
     """
     try:
-        # aiplatform.init already called globally if needed, or can be called here too.
-        # For safety, ensure it's initialized for the context of this function.
         aiplatform.init(project=project_id, location=location)
         models = aiplatform.Model.list(
             filter=f'display_name="{model_display_name}"',
-            order_by="update_time desc" # Get the latest version
+            order_by="update_time desc" 
         )
         if not models:
             err_msg = f"Vertex AI Model with display_name '{model_display_name}' not found in project '{project_id}', region '{location}'."
@@ -86,9 +84,7 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
     gcp_project_id = os.environ.get("GCP_PROJECT_ID")
     gcp_region = os.environ.get("GCP_REGION")
     firms_api_key = os.environ.get("FIRMS_API_KEY")
-    vertex_ai_model_name = os.environ.get("VERTEX_AI_MODEL_NAME", "dummy_wildfire_detector_v1")
-    # VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME is no longer used by this function to configure the job directly.
-    # It will be the target for the Cloud Logging Sink.
+    vertex_ai_model_name = os.environ.get("VERTEX_AI_MODEL_NAME") 
 
     core_env_vars = {
         "GCP_PROJECT_ID": gcp_project_id, "GCP_REGION": gcp_region,
@@ -110,18 +106,14 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
                       "due to client library limitations. A Cloud Logging Sink should be used to forward job "
                       "completion events to the appropriate Pub/Sub topic for the ResultProcessorCF.")
 
-
-    target_date_for_data = datetime.now(dt_timezone.utc) - timedelta(days=1) # Process yesterday's data
+    target_date_for_data = datetime.now(dt_timezone.utc) - timedelta(days=1)
     acquisition_date_str = target_date_for_data.strftime('%Y-%m-%d')
     _log_json("INFO", f"Target acquisition date for FIRMS and Satellite Imagery: {acquisition_date_str}")
 
     try:
-        # Initialize clients
         storage_client = storage.Client(project=gcp_project_id)
-        # Initialize aiplatform client, explicitly setting project and location for clarity
         aiplatform.init(project=gcp_project_id, location=gcp_region)
 
-        # --- 1. FIRMS Data Retrieval ---
         _log_json("INFO", "Initiating FIRMS data retrieval.")
         firms_retriever = FirmsDataRetriever(
             api_key=firms_api_key,
@@ -131,7 +123,6 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
         firms_hotspots_df = firms_retriever.get_and_filter_firms_data(MONITORED_REGIONS)
         _log_json("INFO", "FIRMS data retrieval complete.", firms_hotspots_count=len(firms_hotspots_df))
 
-        # --- 2. Satellite Imagery Acquisition ---
         _log_json("INFO", "Initiating satellite imagery acquisition (GEE export tasks).")
         imagery_acquirer = SatelliteImageryAcquirer(gcs_bucket_name=GCS_BUCKET_NAME)
         gcs_image_uris_by_region_id: Dict[str, str] = imagery_acquirer.acquire_and_export_imagery(
@@ -142,9 +133,8 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
 
         if not gcs_image_uris_by_region_id:
             _log_json("WARNING", "No satellite imagery export tasks were initiated. Skipping Vertex AI Batch Prediction.")
-            return # Exit if no images to process
+            return
 
-        # --- 3. Prepare Vertex AI Batch Prediction Input ---
         _log_json("INFO", "Preparing Vertex AI Batch Prediction input file (JSONL).")
         batch_input_instances: List[Dict[str, Any]] = []
         for region_id, gcs_image_uri in gcs_image_uris_by_region_id.items():
@@ -159,12 +149,11 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
                 region_specific_firms = firms_hotspots_df[firms_hotspots_df['monitored_region_id'] == region_id]
                 region_firms_count = region_specific_firms.shape[0]
 
-            # Unique instance ID for each image, incorporating date
             instance_id = f"{region_id}_{acquisition_date_str.replace('-', '')}"
             batch_input_instances.append({
                 "instance_id": instance_id,
                 "gcs_image_uri": gcs_image_uri,
-                "region_metadata": region_metadata, # Include full region metadata
+                "region_metadata": region_metadata,
                 "firms_hotspot_count_in_region": region_firms_count
             })
 
@@ -172,8 +161,7 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
             _log_json("WARNING", "No valid instances prepared for Vertex AI Batch Prediction after filtering. Exiting.")
             return
 
-        # Upload batch input file to GCS
-        timestamp_str = datetime.now(dt_timezone.utc).strftime('%Y%m%d%H%M%S%f') # Microsecond precision for uniqueness
+        timestamp_str = datetime.now(dt_timezone.utc).strftime('%Y%m%d%H%M%S%f')
         input_filename = f"batch_input_{acquisition_date_str.replace('-', '')}_{timestamp_str}.jsonl"
         input_gcs_path_in_bucket = f"{GCS_BATCH_INPUT_DIR}{input_filename}"
         input_gcs_uri = f"gs://{GCS_BUCKET_NAME}/{input_gcs_path_in_bucket}"
@@ -185,13 +173,10 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
         _log_json("INFO", "Vertex AI Batch Prediction input file uploaded to GCS.",
                            input_gcs_uri=input_gcs_uri, num_instances=len(batch_input_instances))
 
-        # --- 4. Submit Vertex AI Batch Prediction Job ---
         _log_json("INFO", "Constructing Vertex AI Batch Prediction job arguments.")
         model_resource_name = _get_vertex_ai_model_resource_name(vertex_ai_model_name, gcp_project_id, gcp_region)
         
-        # Output prefix in GCS for this job's results
         batch_job_output_gcs_prefix = f"gs://{GCS_BUCKET_NAME}/{GCS_BATCH_OUTPUT_DIR_PREFIX}"
-        
         job_display_name = f"wildfire_detection_batch_{acquisition_date_str.replace('-', '')}_{timestamp_str}"
         
         input_config = BatchPredictionJob.InputConfig(
@@ -199,39 +184,29 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
             gcs_source=GcsSource(uris=[input_gcs_uri])
         )
         output_config = BatchPredictionJob.OutputConfig(
-            predictions_format="jsonl", # Output from handler will be JSONL
+            predictions_format="jsonl",
             gcs_destination=GcsDestination(output_uri_prefix=batch_job_output_gcs_prefix)
         )
-        
-        # Define machine resources for the batch prediction job
-        machine_spec = MachineSpec(machine_type="n1-standard-4") # Example, adjust based on model needs
+        machine_spec = MachineSpec(machine_type="n1-standard-4")
         dedicated_resources = BatchDedicatedResources(
             machine_spec=machine_spec,
-            starting_replica_count=1, # Can be 0 for serverless, or 1+ for dedicated
-            max_replica_count=5       # Adjust based on expected load and budget
+            starting_replica_count=1,
+            max_replica_count=5
         )
 
-        # Construct the BatchPredictionJob object
-        # NO notification_spec here
         batch_prediction_job_resource = BatchPredictionJob(
             display_name=job_display_name,
             model=model_resource_name,
             input_config=input_config,
             output_config=output_config,
             dedicated_resources=dedicated_resources,
-            # Ensure this service account has necessary permissions (Vertex AI User, Storage R/W)
             service_account=f"fire-app-vm-service-account@{gcp_project_id}.iam.gserviceaccount.com",
-            # generate_explanation=False, # Set to True if model explanations are needed and configured
-            # model_parameters={}, # If your model accepts parameters
         )
 
-        # Create the JobServiceClient with the regional endpoint
         client_options = {"api_endpoint": f"{gcp_region}-aiplatform.googleapis.com"}
         job_service_client = JobServiceClient(client_options=client_options)
-        
         parent_path = f"projects/{gcp_project_id}/locations/{gcp_region}"
 
-        # Create the batch prediction job
         created_job_response = job_service_client.create_batch_prediction_job(
             parent=parent_path,
             batch_prediction_job=batch_prediction_job_resource
@@ -240,17 +215,17 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
         _log_json("INFO", "Vertex AI Batch Prediction job creation request sent successfully.",
                            job_display_name=created_job_response.display_name,
                            job_resource_name=created_job_response.name,
-                           job_state=str(created_job_response.state)) # Log initial state
+                           job_state=str(created_job_response.state))
 
     except ValueError as ve:
         _log_json("CRITICAL", f"A configuration or validation error occurred: {str(ve)}", error_type=type(ve).__name__)
-        raise # Re-raise to signal Cloud Function failure
+        raise
     except Exception as e:
         _log_json("CRITICAL", "An unhandled error occurred during pipeline initiation.",
                    error=str(e), error_type=type(e).__name__)
         import traceback
         _log_json("ERROR", "Traceback:", traceback_details=traceback.format_exc())
-        raise e # Re-raise to signal Cloud Function failure
+        raise e
 
     _log_json("INFO", "Pipeline Initiator Cloud Function execution finished.")
 
@@ -259,14 +234,16 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
 if __name__ == "__main__":
     print("--- Running local test for Pipeline Initiator Cloud Function ---")
 
-    # Set environment variables for local testing
-    # Ensure these are appropriate for your test environment
     os.environ["GCP_PROJECT_ID"] = os.environ.get("GCP_PROJECT_ID", "haryo-kebakaran")
     os.environ["GCP_REGION"] = os.environ.get("GCP_REGION", "asia-southeast2")
-    os.environ["FIRMS_API_KEY"] = os.environ.get("FIRMS_API_KEY", "0331973a7ee830ca7f026493faaa367a") # Replace if needed
-    os.environ["VERTEX_AI_MODEL_NAME"] = os.environ.get("VERTEX_AI_MODEL_NAME", "dummy_wildfire_detector_v1")
-    # Note: VERTEX_NOTIFICATION_PUBSUB_TOPIC_NAME is not used by this script to configure the job.
-    # The Pub/Sub topic (e.g., vertex-job-completion-topic) should be the destination for a Cloud Logging Sink.
+    os.environ["FIRMS_API_KEY"] = os.environ.get("FIRMS_API_KEY", "0331973a7ee830ca7f026493faaa367a")
+    
+    # --- MODIFIED FOR LOCAL TEST ---
+    # This MUST match the display name of the model registered with the prebuilt container
+    # that was created using Python 3.9 / PyTorch 2.4.0 MAR file.
+    CORRECT_MODEL_DISPLAY_NAME_FOR_PREBUILT = "dummy_wildfire_prebuilt_pt24_overwrite_v1" 
+    os.environ["VERTEX_AI_MODEL_NAME"] = CORRECT_MODEL_DISPLAY_NAME_FOR_PREBUILT
+    # --- END MODIFICATION ---
 
     if os.environ.get("FIRMS_API_KEY") == "YOUR_FIRMS_API_KEY_PLACEHOLDER": # Example placeholder check
         print("WARNING: FIRMS_API_KEY is set to a placeholder. Real FIRMS data retrieval will likely fail.")
@@ -276,6 +253,7 @@ if __name__ == "__main__":
     else:
         print(f"ERROR: GCS_BUCKET_NAME in src/common/config.py ('{GCS_BUCKET_NAME}') might be incorrect for local test.")
 
+    print(f"Local test will use Vertex AI Model Display Name: {os.environ['VERTEX_AI_MODEL_NAME']}") 
     print("Local test will NOT attempt to configure direct Pub/Sub notifications from the Vertex AI Batch Job.")
     print("A Cloud Logging Sink should be configured separately to forward job completion events to Pub/Sub.")
     print(f"Ensure the Vertex AI model '{os.environ['VERTEX_AI_MODEL_NAME']}' exists in project "

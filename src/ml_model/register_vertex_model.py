@@ -1,29 +1,37 @@
-# register_vertex_model.py
+# src/ml_model/register_vertex_model.py
 from google.cloud import aiplatform
 import os
 
 PROJECT_ID = "haryo-kebakaran"
 REGION = "asia-southeast2"
-BUCKET_NAME = "fire-app-bucket"
+BUCKET_NAME = "fire-app-bucket" # Your bucket
 
 aiplatform.init(project=PROJECT_ID, location=REGION)
 
-serving_container_image_uri = f"{REGION}-docker.pkg.dev/{PROJECT_ID}/wildfire-detector-ts/wildfire-detector-ts:latest"
-artifact_uri = f"gs://{BUCKET_NAME}/models/dummy_fire_detection/"
+# Official Prebuilt Container URI for PyTorch "2.4" CPU in Asia
+PREBUILT_PYTORCH_CPU_URI = "asia-docker.pkg.dev/vertex-ai/prediction/pytorch-cpu.2-4:latest" 
+
+MODEL_DISPLAY_NAME = "dummy_wildfire_prebuilt_pt24_overwrite_v1" # New distinct display name
+# This is the GCS DIRECTORY where your model.mar is located.
+GCS_ARTIFACT_DIRECTORY = f"gs://{BUCKET_NAME}/models/dummy_fire_detection/" 
 
 try:
-    print(f"Attempting to upload model '{PROJECT_ID}' in '{REGION}'...")
+    print(f"Attempting to upload model '{MODEL_DISPLAY_NAME}' using prebuilt container in '{REGION}'...")
+    print(f"Using prebuilt container URI: {PREBUILT_PYTORCH_CPU_URI}")
+    print(f"Expecting model.mar in GCS artifact directory: {GCS_ARTIFACT_DIRECTORY}")
+
     model = aiplatform.Model.upload(
-        display_name="dummy_wildfire_detector_v1",
-        artifact_uri=artifact_uri,
-        serving_container_image_uri=serving_container_image_uri,
-        serving_container_predict_route="/predictions/model",
+        display_name=MODEL_DISPLAY_NAME,
+        artifact_uri=GCS_ARTIFACT_DIRECTORY, 
+        serving_container_image_uri=PREBUILT_PYTORCH_CPU_URI,
+        serving_container_predict_route="/predictions/model", 
         serving_container_health_route="/ping"
     )
-    model.wait()
-    print(f"Model uploaded successfully. Resource name: {model.resource_name}")
-    # IMPORTANT: Copy the NEW MODEL ID from the end of the 'resource_name' output.
+    print(f"Model registration for '{MODEL_DISPLAY_NAME}' submitted successfully.")
+    print(f"Resource name: {model.resource_name}")
+    print(f"View in console: {model.gca_resource.url if hasattr(model, 'gca_resource') else 'Check Vertex AI Models UI'}")
+
 except Exception as e:
     print(f"Error uploading model: {e}")
-    print("This might happen if the model with this display_name already exists.")
-    print("If it exists, check Vertex AI -> Models to get its ID, or increment version.")
+    import traceback
+    traceback.print_exc()

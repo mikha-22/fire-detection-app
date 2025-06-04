@@ -5,6 +5,7 @@
 
 echo "Step 1: Generating model.pth..."
 # Run the python script to save model.pth into src/ml_model/
+# Ensure the Python environment active here has torch==2.4.0 installed
 python src/ml_model/fire_detection_model.py
 
 # Check if model.pth was created successfully
@@ -17,10 +18,13 @@ echo "src/ml_model/model.pth generated successfully."
 echo "Step 2: Archiving model into model.mar..."
 # Define a temporary directory for torch-model-archiver output
 TEMP_EXPORT_PATH="src/ml_model/model_store_temp"
+# Remove existing temp path if it exists to avoid issues
+rm -rf "$TEMP_EXPORT_PATH" 
 mkdir -p "$TEMP_EXPORT_PATH" # Create if it doesn't exist
 
 # Run torch-model-archiver
 # Paths are relative to the project root where this script is run.
+# The --requirements-file flag ensures src/ml_model/requirements.txt is packaged.
 torch-model-archiver --model-name model \
                      --version 1.0 \
                      --model-file src/ml_model/fire_detection_model.py \
@@ -38,8 +42,10 @@ if [ ! -f "$TEMP_EXPORT_PATH/model.mar" ]; then
 fi
 echo "$TEMP_EXPORT_PATH/model.mar created successfully."
 
-echo "Step 3: Moving model.mar to its final location for Docker..."
-# Move the created model.mar to the location the Dockerfile expects
+echo "Step 3: Moving model.mar to its final location..."
+# Move the created model.mar to the location the prebuilt container might expect or for GCS upload
+# For prebuilt containers, you upload this model.mar to GCS.
+# The Dockerfile COPY is not relevant if using prebuilt containers.
 mv "$TEMP_EXPORT_PATH/model.mar" "src/ml_model/model.mar"
 
 # Check if the move was successful
@@ -55,4 +61,4 @@ rm -rf "$TEMP_EXPORT_PATH"
 echo "Temporary directory $TEMP_EXPORT_PATH removed."
 
 echo "Model archiving process completed successfully."
-echo "You can now build your Docker image."
+echo "You can now upload src/ml_model/model.mar to GCS and register it with Vertex AI using the prebuilt container."
