@@ -1,64 +1,60 @@
 #!/bin/bash
 
-# Ensure you are in the project root directory (e.g., fire-detection-app/)
-# cd /path/to/your/fire-detection-app
-
+# Ensure you are in the project root directory
 echo "Step 1: Generating model.pth..."
-# Run the python script to save model.pth into src/ml_model/
-# Ensure the Python environment active here has torch==2.4.0 installed
 python src/ml_model/fire_detection_model.py
 
-# Check if model.pth was created successfully
 if [ ! -f "src/ml_model/model.pth" ]; then
-    echo "ERROR: src/ml_model/model.pth not found after running fire_detection_model.py!"
+    echo "ERROR: src/ml_model/model.pth not found!"
     exit 1
 fi
-echo "src/ml_model/model.pth generated successfully."
+echo "model.pth generated successfully."
 
 echo "Step 2: Archiving model into model.mar..."
-# Define a temporary directory for torch-model-archiver output
 TEMP_EXPORT_PATH="src/ml_model/model_store_temp"
-# Remove existing temp path if it exists to avoid issues
-rm -rf "$TEMP_EXPORT_PATH" 
-mkdir -p "$TEMP_EXPORT_PATH" # Create if it doesn't exist
+rm -rf "$TEMP_EXPORT_PATH"
+mkdir -p "$TEMP_EXPORT_PATH"
 
-# Run torch-model-archiver
-# Paths are relative to the project root where this script is run.
-# The --requirements-file flag ensures src/ml_model/requirements.txt is packaged.
+# --- CORRECTED PART ---
+# Copy files from their correct location (src/ml_model/) to the root.
+cp src/ml_model/handler.py .
+cp src/ml_model/fire_detection_model.py .
+
+# Use the correct path for the requirements file: src/ml_model/requirements.txt
 torch-model-archiver --model-name model \
                      --version 1.0 \
-                     --model-file src/ml_model/fire_detection_model.py \
+                     --model-file fire_detection_model.py \
                      --serialized-file src/ml_model/model.pth \
-                     --handler src/ml_model/handler.py \
+                     --handler handler.py \
                      --requirements-file src/ml_model/requirements.txt \
                      --export-path "$TEMP_EXPORT_PATH" \
                      --force
 
-# Check if model.mar was created in the temp export path
+# Clean up the temporarily copied files
+rm handler.py
+rm fire_detection_model.py
+# --- END CORRECTION ---
+
+
 if [ ! -f "$TEMP_EXPORT_PATH/model.mar" ]; then
-    echo "ERROR: $TEMP_EXPORT_PATH/model.mar not found after running torch-model-archiver!"
-    rm -rf "$TEMP_EXPORT_PATH" # Clean up temp directory on failure
+    echo "ERROR: $TEMP_EXPORT_PATH/model.mar not found!"
+    rm -rf "$TEMP_EXPORT_PATH"
     exit 1
 fi
 echo "$TEMP_EXPORT_PATH/model.mar created successfully."
 
 echo "Step 3: Moving model.mar to its final location..."
-# Move the created model.mar to the location the prebuilt container might expect or for GCS upload
-# For prebuilt containers, you upload this model.mar to GCS.
-# The Dockerfile COPY is not relevant if using prebuilt containers.
 mv "$TEMP_EXPORT_PATH/model.mar" "src/ml_model/model.mar"
 
-# Check if the move was successful
 if [ ! -f "src/ml_model/model.mar" ]; then
     echo "ERROR: Failed to move model.mar to src/ml_model/model.mar!"
-    rm -rf "$TEMP_EXPORT_PATH" # Clean up temp directory
+    rm -rf "$TEMP_EXPORT_PATH"
     exit 1
 fi
 echo "model.mar moved to src/ml_model/model.mar."
 
 echo "Step 4: Cleaning up temporary export directory..."
 rm -rf "$TEMP_EXPORT_PATH"
-echo "Temporary directory $TEMP_EXPORT_PATH removed."
+echo "Temporary directory removed."
 
 echo "Model archiving process completed successfully."
-echo "You can now upload src/ml_model/model.mar to GCS and register it with Vertex AI using the prebuilt container."

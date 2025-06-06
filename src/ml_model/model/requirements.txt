@@ -1,3 +1,0 @@
-# src/ml_model/requirements.txt (for both Dockerfile and .mar bundle)
-google-cloud-storage
-Pillow
