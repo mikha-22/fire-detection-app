@@ -16,9 +16,7 @@ from src.firms_data_retriever.retriever import FirmsDataRetriever, FIRMS_API_BAS
 from src.map_visualizer.visualizer import MapVisualizer
 
 # --- Configuration for Cloud Function ---
-GCS_FINAL_MAPS_DIR = "final_outputs/maps/"
-GCS_METADATA_DIR = "final_outputs/metadata/"
-FINAL_STATUS_FILENAME = "wildfire_status_latest.json"
+GCS_DAILY_REPORTS_DIR = "final_outputs/daily_reports/"
 
 # --- Logging Setup ---
 logger = logging.getLogger(__name__)
@@ -133,9 +131,6 @@ def result_processor_cloud_function(event: Dict, context: Dict):
     storage_client = storage.Client(project=gcp_project_id)
     
     try:
-        # --- THE NEW SIMPLIFIED LOGIC: Calculate the predictable path ---
-        # The job runs daily for yesterday's data. We calculate the same date
-        # that the PipelineInitiatorCF used for the folder name.
         target_date = datetime.utcnow() - timedelta(days=1)
         acquisition_date_str = target_date.strftime('%Y-%m-%d')
         
@@ -222,7 +217,9 @@ def result_processor_cloud_function(event: Dict, context: Dict):
                             map_image_bytes = map_image_buffer.getvalue()
 
                             map_filename = f"map_{region_id}_{current_region_acquisition_date_str.replace('-', '')}.png"
-                            gcs_map_blob_name = f"{GCS_FINAL_MAPS_DIR}{map_filename}"
+                            
+                            gcs_map_blob_name = f"{GCS_DAILY_REPORTS_DIR}{acquisition_date_str}/{map_filename}"
+                            
                             _upload_gcs_blob_from_bytes(storage_client, GCS_BUCKET_NAME, gcs_map_blob_name, map_image_bytes, content_type="image/png")
                             area_status["gcs_map_image_path"] = f"gs://{GCS_BUCKET_NAME}/{gcs_map_blob_name}"
                         except Exception as map_e:
@@ -257,11 +254,12 @@ def result_processor_cloud_function(event: Dict, context: Dict):
             }
         }
 
-        final_status_json_output = json.dumps(final_status_report, indent=2)
-        final_status_gcs_blob_name = f"{GCS_METADATA_DIR}{FINAL_STATUS_FILENAME}"
-        _upload_gcs_blob_from_bytes(storage_client, GCS_BUCKET_NAME, final_status_gcs_blob_name,
-                                    final_status_json_output.encode('utf-8'), content_type="application/json")
-        _log_json("INFO", "Final wildfire status report uploaded to GCS.", path=f"gs://{GCS_BUCKET_NAME}/{final_status_gcs_blob_name}")
+        final_status_json_output = json.dumps(final_status_report, indent=2).encode('utf-8')
+        
+        daily_report_gcs_blob_name = f"{GCS_DAILY_REPORTS_DIR}{acquisition_date_str}/report.json"
+        _upload_gcs_blob_from_bytes(storage_client, GCS_BUCKET_NAME, daily_report_gcs_blob_name,
+                                    final_status_json_output, content_type="application/json")
+        _log_json("INFO", "Daily wildfire status report uploaded to GCS.", path=f"gs://{GCS_BUCKET_NAME}/{daily_report_gcs_blob_name}")
 
     except Exception as e:
         _log_json("CRITICAL", "An unhandled error occurred.", error=str(e), error_type=type(e).__name__)
