@@ -150,8 +150,8 @@ def result_processor_cloud_function(event: Dict, context: Dict):
 
         _log_json("INFO", f"Extracted job_id '{job_id}' from trigger message. Trusting sink filter and proceeding.")
 
-        _log_json("INFO", "Waiting for 20 seconds to allow for API consistency...")
-        time.sleep(20)
+        _log_json("INFO", "Waiting for 60 seconds to allow for API consistency...")
+        time.sleep(60)
 
         job_resource_name = f"projects/{gcp_project_id}/locations/{gcp_region}/batchPredictionJobs/{job_id}"
         
@@ -173,7 +173,7 @@ def result_processor_cloud_function(event: Dict, context: Dict):
         
         if not all_ai_predictions_by_instance_id:
             _log_json("WARNING", "No AI predictions found or parsed. Exiting gracefully.")
-            return # Exit if no results to process
+            return
         else:
             first_instance_id = next(iter(all_ai_predictions_by_instance_id.keys()), None)
             if first_instance_id and '_' in first_instance_id:
