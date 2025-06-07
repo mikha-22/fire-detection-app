@@ -75,6 +75,11 @@ class WildfirePredictor(Predictor):
         """
         _log_json("DEBUG", "Received instance for preprocessing.", instance_data=prediction_input)
 
+        # --- THE FIX: Increase Pillow's image size limit ---
+        # Set a new limit of 150 million pixels to handle large satellite images.
+        Image.MAX_IMAGE_PIXELS = 150_000_000
+        # ---------------------------------------------------
+
         if "instances" in prediction_input and isinstance(prediction_input["instances"], list) and prediction_input["instances"]:
             actual_instance = prediction_input["instances"][0]
         else:
@@ -106,19 +111,14 @@ class WildfirePredictor(Predictor):
         Performs prediction on a single preprocessed instance.
         The `instances` argument is now a TUPLE, not a list.
         """
-        # *** THE FINAL FIX: Unpack the single tuple directly. No more zipping. ***
         original_input, tensor = instances
         
-        # Add a batch dimension (N=1) for the model and send to device
         batch_to_infer = tensor.unsqueeze(0).to(self._device)
         _log_json("INFO", "Performing inference on a single instance.", shape=str(batch_to_infer.shape))
         
         with torch.no_grad():
-            # Model output will have shape [1, 2]
             prediction_output = self._model(batch_to_infer)
 
-        # Remove the batch dimension from the output and re-pack the result
-        # into a list containing a single tuple, as expected by postprocess.
         return [(original_input, prediction_output[0])]
 
     def postprocess(self, prediction_results: List[Tuple[Dict[str, Any], torch.Tensor]]) -> Dict[str, List[Dict[str, Any]]]:
