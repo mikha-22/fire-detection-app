@@ -183,14 +183,10 @@ class SatelliteImageryAcquirer:
                     description=f"Export_{image_filename_stem}",
                     bucket=self.gcs_bucket_name,
                     fileNamePrefix=gcs_file_prefix_for_export,
-                    scale=10,
+                    scale=100,
                     region=export_geometry,
                     fileFormat='GeoTIFF',
-                    # --- MODIFICATION ---
-                    # Increased maxPixels to allow larger exports like australia_southeast
-                    # Original error indicated ~1.5e10 pixels. Setting to 2e10 for buffer.
                     maxPixels=2e10
-                    # --- END MODIFICATION ---
                 )
                 task.start()
                 _log_json("INFO", "GEE export task initiated.",
@@ -229,7 +225,6 @@ if __name__ == "__main__":
     else:
         _log_json("ERROR", f"GCS_BUCKET_NAME in src/common/config.py ('{GCS_BUCKET_NAME}') "
                            "does not match expected 'fire-app-bucket'. Please verify.")
-        # exit(1) # Consider exiting if bucket name is critical for the test
 
     try:
         acquirer = SatelliteImageryAcquirer(gcs_bucket_name=GCS_BUCKET_NAME)
