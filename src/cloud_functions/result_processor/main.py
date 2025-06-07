@@ -148,10 +148,8 @@ def result_processor_cloud_function(event: Dict, context: Dict):
             _log_json("ERROR", "Could not find 'job_id' in the received log message payload.", payload=message_data)
             raise ValueError("Payload is missing the required job_id.")
 
-        _log_json("INFO", f"Extracted job_id '{job_id}' from trigger message. Assuming job was successful as per sink filter.")
+        _log_json("INFO", f"Extracted job_id '{job_id}' from trigger message. Trusting sink filter and proceeding.")
 
-        # --- THE FIX: Wait for a short period to allow the Vertex API to become consistent ---
-        # This mitigates the race condition where the log is written before the API status is updated.
         _log_json("INFO", "Waiting for 20 seconds to allow for API consistency...")
         time.sleep(20)
 
@@ -160,13 +158,7 @@ def result_processor_cloud_function(event: Dict, context: Dict):
         try:
             batch_job = aiplatform.BatchPredictionJob(batch_prediction_job_name=job_resource_name)
             output_gcs_uri_prefix = batch_job.output_info.gcs_output_directory
-            job_state = batch_job.state.name
-            _log_json("INFO", "Vertex AI Batch Job details fetched.", job_name=job_resource_name, job_state=job_state, output_gcs_prefix=output_gcs_uri_prefix)
-
-            # --- THE FIX: Instead of failing, just log a warning and proceed ---
-            if job_state != 'JOB_STATE_SUCCEEDED':
-                _log_json("WARNING", f"Job state is '{job_state}', not SUCCEEDED. The sink might have triggered before the API updated. Proceeding anyway based on sink's trigger.")
-
+            _log_json("INFO", "Successfully fetched job details to get output path.", job_name=job_resource_name, output_gcs_prefix=output_gcs_uri_prefix)
         except Exception as api_err:
             _log_json("ERROR", f"Failed to fetch BatchPredictionJob details from API for job '{job_resource_name}'.", error=str(api_err))
             raise
@@ -180,7 +172,8 @@ def result_processor_cloud_function(event: Dict, context: Dict):
         all_ai_predictions_by_instance_id = _parse_vertex_ai_batch_output(storage_client, output_gcs_uri_prefix)
         
         if not all_ai_predictions_by_instance_id:
-            _log_json("WARNING", "No AI predictions found or parsed.")
+            _log_json("WARNING", "No AI predictions found or parsed. Exiting gracefully.")
+            return # Exit if no results to process
         else:
             first_instance_id = next(iter(all_ai_predictions_by_instance_id.keys()), None)
             if first_instance_id and '_' in first_instance_id:
@@ -316,4 +309,3 @@ def result_processor_cloud_function(event: Dict, context: Dict):
 if __name__ == "__main__":
     print("--- Local test for Result Processor Cloud Function ---")
     print("NOTE: This local test harness needs to be updated to simulate the new log-based trigger.")
-    
