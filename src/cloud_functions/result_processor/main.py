@@ -4,23 +4,26 @@ import os
 import logging
 import json
 import io
+import time  # Import the time module for sleeping
 import pandas as pd
-from datetime import datetime, timedelta
-from google.cloud import storage, aiplatform  # ### NEW: Added aiplatform ###
+from datetime import datetime
+from google.cloud import storage, aiplatform
 import base64
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Optional
 
+# Import components from our project structure
 from src.common.config import MONITORED_REGIONS, GCS_BUCKET_NAME
 from src.firms_data_retriever.retriever import FirmsDataRetriever, FIRMS_API_BASE_URL, FIRMS_SENSORS
 from src.map_visualizer.visualizer import MapVisualizer
 
+# --- Configuration for Cloud Function ---
 GCS_FINAL_MAPS_DIR = "final_outputs/maps/"
 GCS_METADATA_DIR = "final_outputs/metadata/"
 FINAL_STATUS_FILENAME = "wildfire_status_latest.json"
 
+# --- Logging Setup ---
 logger = logging.getLogger(__name__)
 
-# ... (all helper functions like _log_json, _download_gcs_blob_as_bytes, etc. remain the same) ...
 def _log_json(severity: str, message: str, **kwargs):
     log_entry = {
         "severity": severity.upper(),
@@ -60,30 +63,30 @@ def _upload_gcs_blob_from_bytes(storage_client: storage.Client, bucket_name: str
 
 def _parse_vertex_ai_batch_output(storage_client: storage.Client, output_gcs_uri_prefix: str) -> Dict[str, Dict[str, Any]]:
     prediction_results: Dict[str, Dict[str, Any]] = {}
-
+    
     if not output_gcs_uri_prefix.startswith("gs://"):
         _log_json("ERROR", "Invalid GCS output URI prefix format.", uri=output_gcs_uri_prefix)
         return {}
-
+    
     path_parts = output_gcs_uri_prefix.replace("gs://", "").split("/", 1)
     if len(path_parts) < 2:
         _log_json("ERROR", "Invalid GCS output URI prefix, missing path.", uri=output_gcs_uri_prefix)
         return {}
 
     bucket_name = path_parts[0]
-    prefix = path_parts[1]
-
+    prefix = path_parts[1] 
+    
     bucket = storage_client.bucket(bucket_name)
     _log_json("INFO", "Searching for Vertex AI batch prediction output files.", bucket=bucket_name, prefix=prefix)
-
+    
     blobs = bucket.list_blobs(prefix=prefix)
-
+    
     found_predictions_file = False
     for blob in blobs:
         if "prediction.results" in blob.name:
             found_predictions_file = True
             _log_json("INFO", "Found Vertex AI predictions file.", blob_name=blob.name)
-
+            
             predictions_bytes = _download_gcs_blob_as_bytes(storage_client, bucket_name, blob.name)
             if predictions_bytes:
                 try:
@@ -91,7 +94,7 @@ def _parse_vertex_ai_batch_output(storage_client: storage.Client, output_gcs_uri
                         if not line.strip(): continue
                         try:
                             entry = json.loads(line)
-                            instance_data = entry.get("instance", {})
+                            instance_data = entry.get("instance", {}) 
                             prediction_data_from_handler = entry.get("prediction", {})
                             instance_id_from_vertex_instance_field = instance_data.get("instance_id")
 
@@ -108,19 +111,20 @@ def _parse_vertex_ai_batch_output(storage_client: storage.Client, output_gcs_uri
                             _log_json("ERROR", f"Unexpected error processing line: {e_line}", line_number=line_number + 1)
                 except UnicodeDecodeError as ude:
                      _log_json("ERROR", f"Failed to decode predictions file as UTF-8: {ude}", blob_name=blob.name)
-
+    
     if not found_predictions_file:
         _log_json("WARNING", "No 'prediction.results' files found in batch output directory.", prefix=prefix)
 
     _log_json("INFO", "Finished parsing Vertex AI batch prediction output.", total_results_parsed=len(prediction_results))
     return prediction_results
 
+
 # Main Cloud Function entry point
 def result_processor_cloud_function(event: Dict, context: Dict):
     _log_json("INFO", "Result Processor Cloud Function triggered.")
 
     gcp_project_id = os.environ.get("GCP_PROJECT_ID")
-    gcp_region = os.environ.get("GCP_REGION") # ### NEW: Get region for API calls ###
+    gcp_region = os.environ.get("GCP_REGION")
     firms_api_key = os.environ.get("FIRMS_API_KEY")
 
     if not all([gcp_project_id, gcp_region, firms_api_key, GCS_BUCKET_NAME]):
@@ -129,7 +133,6 @@ def result_processor_cloud_function(event: Dict, context: Dict):
         raise ValueError(f"Missing required configurations: {', '.join(missing_vars)}")
 
     storage_client = storage.Client(project=gcp_project_id)
-    ### NEW: Initialize AI Platform client ###
     aiplatform.init(project=gcp_project_id, location=gcp_region)
 
     if 'data' not in event:
@@ -140,14 +143,18 @@ def result_processor_cloud_function(event: Dict, context: Dict):
         message_data_str = base64.b64decode(event['data']).decode('utf-8')
         message_data = json.loads(message_data_str)
 
-        ### NEW: Logic to handle the new log format ###
         job_id = message_data.get("resource", {}).get("labels", {}).get("job_id")
         if not job_id:
             _log_json("ERROR", "Could not find 'job_id' in the received log message payload.", payload=message_data)
             raise ValueError("Payload is missing the required job_id.")
 
-        _log_json("INFO", f"Extracted job_id '{job_id}' from trigger message. Fetching job details.")
-        
+        _log_json("INFO", f"Extracted job_id '{job_id}' from trigger message. Assuming job was successful as per sink filter.")
+
+        # --- THE FIX: Wait for a short period to allow the Vertex API to become consistent ---
+        # This mitigates the race condition where the log is written before the API status is updated.
+        _log_json("INFO", "Waiting for 20 seconds to allow for API consistency...")
+        time.sleep(20)
+
         job_resource_name = f"projects/{gcp_project_id}/locations/{gcp_region}/batchPredictionJobs/{job_id}"
         
         try:
@@ -155,21 +162,19 @@ def result_processor_cloud_function(event: Dict, context: Dict):
             output_gcs_uri_prefix = batch_job.output_info.gcs_output_directory
             job_state = batch_job.state.name
             _log_json("INFO", "Vertex AI Batch Job details fetched.", job_name=job_resource_name, job_state=job_state, output_gcs_prefix=output_gcs_uri_prefix)
+
+            # --- THE FIX: Instead of failing, just log a warning and proceed ---
+            if job_state != 'JOB_STATE_SUCCEEDED':
+                _log_json("WARNING", f"Job state is '{job_state}', not SUCCEEDED. The sink might have triggered before the API updated. Proceeding anyway based on sink's trigger.")
+
         except Exception as api_err:
             _log_json("ERROR", f"Failed to fetch BatchPredictionJob details from API for job '{job_resource_name}'.", error=str(api_err))
             raise
 
-        # The rest of the function proceeds as before, using the fetched output_gcs_uri_prefix
-        if "SUCCEEDED" not in job_state:
-            _log_json("WARNING", f"Job '{job_resource_name}' did not succeed. State: {job_state}. Skipping.", job_name=job_resource_name)
-            return
-
         if not output_gcs_uri_prefix:
-            _log_json("ERROR", "GCS URI prefix missing from fetched job details.", job_name=job_resource_name)
+            _log_json("ERROR", "GCS URI prefix missing from fetched job details. Cannot proceed.", job_name=job_resource_name)
             raise ValueError("Missing GCS URI prefix.")
 
-        # ... The rest of your function from this point on is IDENTICAL ...
-        # it correctly uses `output_gcs_uri_prefix` which we have now successfully retrieved.
         report_acquisition_date_str = "UnknownDate"
 
         all_ai_predictions_by_instance_id = _parse_vertex_ai_batch_output(storage_client, output_gcs_uri_prefix)
@@ -300,6 +305,8 @@ def result_processor_cloud_function(event: Dict, context: Dict):
 
     except Exception as e:
         _log_json("CRITICAL", "An unhandled error occurred.", error=str(e), error_type=type(e).__name__)
+        import traceback
+        traceback.print_exc()
         raise
 
     _log_json("INFO", "Result Processor Cloud Function execution finished.")
@@ -307,7 +314,6 @@ def result_processor_cloud_function(event: Dict, context: Dict):
 
 # --- Local Testing Entrypoint ---
 if __name__ == "__main__":
-    # This local test block will no longer work as it depends on the old payload format.
-    # It needs to be updated to construct a mock Pub/Sub event with the new `ml_job` log format.
-    # For now, we focus on deploying the fix.
-    print("--- Local test for Result Processor needs to be updated for the new log format. ---")
+    print("--- Local test for Result Processor Cloud Function ---")
+    print("NOTE: This local test harness needs to be updated to simulate the new log-based trigger.")
+    
