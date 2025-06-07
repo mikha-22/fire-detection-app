@@ -71,15 +71,13 @@ class WildfirePredictor(Predictor):
     def preprocess(self, prediction_input: Dict[str, Any]) -> Tuple[Dict[str, Any], torch.Tensor]:
         """
         Preprocesses a single prediction instance.
-        This is now robust to handle the wrapped `{\"instances\": [...]}` format from batch jobs.
+        This is robust to handle the wrapped `{\"instances\": [...]}` format from batch jobs.
         """
         _log_json("DEBUG", "Received instance for preprocessing.", instance_data=prediction_input)
 
-        # *** THE FIX: Unwrap the instance if it comes in the standard request format ***
         if "instances" in prediction_input and isinstance(prediction_input["instances"], list) and prediction_input["instances"]:
             actual_instance = prediction_input["instances"][0]
         else:
-            # Fallback for the case where the input is already a single, unwrapped instance.
             actual_instance = prediction_input
 
         gcs_image_uri = actual_instance.get("gcs_image_uri")
@@ -97,30 +95,36 @@ class WildfirePredictor(Predictor):
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
             transformed_image = MODEL_INPUT_TRANSFORMS(image)
             
-            # Return the original *unwrapped* input alongside the processed tensor
             return (actual_instance, transformed_image)
             
         except Exception as e:
             _log_json("ERROR", "Preprocessing failed for instance.", instance_id=instance_id, error=str(e))
             raise ValueError(f"Failed to preprocess instance {instance_id}: {e}")
 
-    def predict(self, instances: List[Tuple[Dict[str, Any], torch.Tensor]]) -> List[Tuple[Dict[str, Any], torch.Tensor]]:
+    def predict(self, instances: Tuple[Dict[str, Any], torch.Tensor]) -> List[Tuple[Dict[str, Any], torch.Tensor]]:
         """
-        Performs prediction on a batch of preprocessed instances.
+        Performs prediction on a single preprocessed instance.
+        The `instances` argument is now a TUPLE, not a list.
         """
-        original_inputs, tensors = zip(*instances)
+        # *** THE FINAL FIX: Unpack the single tuple directly. No more zipping. ***
+        original_input, tensor = instances
         
-        batch_to_infer = torch.stack(tensors).to(self._device)
-        _log_json("INFO", "Performing inference on a batch.", count=len(tensors), shape=str(batch_to_infer.shape))
+        # Add a batch dimension (N=1) for the model and send to device
+        batch_to_infer = tensor.unsqueeze(0).to(self._device)
+        _log_json("INFO", "Performing inference on a single instance.", shape=str(batch_to_infer.shape))
         
         with torch.no_grad():
-            prediction_outputs = self._model(batch_to_infer)
+            # Model output will have shape [1, 2]
+            prediction_output = self._model(batch_to_infer)
 
-        return list(zip(original_inputs, prediction_outputs))
+        # Remove the batch dimension from the output and re-pack the result
+        # into a list containing a single tuple, as expected by postprocess.
+        return [(original_input, prediction_output[0])]
 
     def postprocess(self, prediction_results: List[Tuple[Dict[str, Any], torch.Tensor]]) -> Dict[str, List[Dict[str, Any]]]:
         """
         Postprocesses the model's prediction results.
+        It receives a list containing a single tuple from the predict method.
         """
         final_predictions = []
         for original_input, inference_output in prediction_results:
