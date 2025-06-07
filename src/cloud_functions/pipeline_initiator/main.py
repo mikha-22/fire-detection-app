@@ -68,7 +68,7 @@ def _get_vertex_ai_model_resource_name(model_display_name: str, project_id: str,
         raise
 
 
-# --- Main Cloud Function entry point (NO CHANGES TO THIS FUNCTION) ---
+# --- Main Cloud Function entry point ---
 def pipeline_initiator_cloud_function(event: Dict, context: Dict):
     _log_json("INFO", "Pipeline Initiator Cloud Function triggered.")
 
@@ -77,7 +77,6 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
     firms_api_key = os.environ.get("FIRMS_API_KEY")
     vertex_ai_model_name = os.environ.get("VERTEX_AI_MODEL_NAME")
 
-    # ... (rest of the function is the same as your original)
     core_env_vars = {
         "GCP_PROJECT_ID": gcp_project_id, "GCP_REGION": gcp_region,
         "FIRMS_API_KEY": firms_api_key, "VERTEX_AI_MODEL_NAME": vertex_ai_model_name,
@@ -120,6 +119,8 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
             return
 
         _log_json("INFO", "Preparing Vertex AI Batch Prediction input file (JSONL).")
+        
+        # *** CORRECTED INSTANCE FORMATTING FOR THE DEPLOYED FUNCTION ***
         batch_input_instances: List[Dict[str, Any]] = []
         for region_id, gcs_image_uri in gcs_image_uris_by_region_id.items():
             region_metadata = next((r for r in MONITORED_REGIONS if r["id"] == region_id), None)
@@ -130,6 +131,7 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
                 region_firms_count = firms_hotspots_df[firms_hotspots_df['monitored_region_id'] == region_id].shape[0]
 
             instance_id = f"{region_id}_{acquisition_date_str.replace('-', '')}"
+            # Create a flat dictionary, as expected by predictor.py
             batch_input_instances.append({
                 "instance_id": instance_id,
                 "gcs_image_uri": gcs_image_uri,
@@ -156,7 +158,6 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
         batch_job_output_gcs_prefix = f"gs://{GCS_BUCKET_NAME}/{GCS_BATCH_OUTPUT_DIR_PREFIX}"
         job_display_name = f"wildfire_detection_batch_{acquisition_date_str.replace('-', '')}_{timestamp_str}"
         
-        # ... (rest of the job submission logic is identical to your original)
         input_config = BatchPredictionJob.InputConfig(instances_format="jsonl", gcs_source=GcsSource(uris=[input_gcs_uri]))
         output_config = BatchPredictionJob.OutputConfig(predictions_format="jsonl", gcs_destination=GcsDestination(output_uri_prefix=batch_job_output_gcs_prefix))
         machine_spec = MachineSpec(machine_type="n1-standard-4")
@@ -185,36 +186,21 @@ def pipeline_initiator_cloud_function(event: Dict, context: Dict):
     _log_json("INFO", "Pipeline Initiator Cloud Function execution finished.")
 
 
-# --- MODIFIED LOCAL TESTING ENTRYPOINT ---
+# --- Main Local Testing Entrypoint ---
 if __name__ == "__main__":
-    """
-    This local test harness is now FAST and RELIABLE.
-    It MOCKS the slow API calls (FIRMS, GEE) and uses pre-uploaded trigger
-    images to test the core logic: creating the batch input file and
-    submitting the job to Vertex AI.
-    """
     print("--- Running FAST local test for Pipeline Initiator ---")
 
-    # --- 1. SET YOUR ENVIRONMENT (Same as before) ---
     os.environ["GCP_PROJECT_ID"] = os.environ.get("GCP_PROJECT_ID", "haryo-kebakaran")
     os.environ["GCP_REGION"] = os.environ.get("GCP_REGION", "asia-southeast2")
-    os.environ["VERTEX_AI_MODEL_NAME"] = "dummy_wildfire_prebuilt_pt24_overwrite_v1"
-    # FIRMS_API_KEY is not needed for this fast local test, as we mock it.
-
-    # --- 2. AUTHENTICATE LOCALLY (Crucial Step!) ---
-    # Make sure you have run 'gcloud auth application-default login' in your terminal.
+    os.environ["VERTEX_AI_MODEL_NAME"] = "wildfire-cpr-predictor-model"
+    
     print(f"Using Project: {os.environ['GCP_PROJECT_ID']}, Region: {os.environ['GCP_REGION']}")
     print(f"Using Model: {os.environ['VERTEX_AI_MODEL_NAME']}")
 
-    # --- 3. MOCK the slow parts ---
-    # We will not call the real FIRMS or GEE acquirers. We simulate their output.
     _log_json("INFO", "[LOCAL TEST] Simulating FIRMS and GEE outputs.")
     
-    # This is the GCS path where you uploaded the trigger images.
-    mock_gcs_image_folder = "mock_trigger_images" # CHANGE THIS if you used a different folder
+    mock_gcs_image_folder = "mock_trigger_images" 
     
-    # Simulate the output of SatelliteImageryAcquirer.
-    # We create a dictionary pointing to our trigger images for each region.
     gcs_image_uris_by_region_id = {
         region["id"]: f"gs://{GCS_BUCKET_NAME}/{mock_gcs_image_folder}/" + \
                       ("force_fire_detection.png" if i % 2 == 0 else "force_no_fire_detection.png")
@@ -224,8 +210,6 @@ if __name__ == "__main__":
     acquisition_date_str = (datetime.now(dt_timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
     _log_json("INFO", "[LOCAL TEST] Mock data prepared.", mock_uris=gcs_image_uris_by_region_id)
 
-    # --- 4. RUN a simplified version of the function's logic ---
-    # This block mirrors the second half of the real function, but uses our fast, mocked data.
     try:
         gcp_project_id = os.environ["GCP_PROJECT_ID"]
         gcp_region = os.environ["GCP_REGION"]
@@ -234,15 +218,18 @@ if __name__ == "__main__":
         storage_client = storage.Client(project=gcp_project_id)
         
         _log_json("INFO", "[LOCAL TEST] Preparing Vertex AI Batch Prediction input file.")
+        
+        # *** CORRECTED INSTANCE FORMATTING FOR THE LOCAL TEST HARNESS ***
         batch_input_instances = []
         for region_id, gcs_image_uri in gcs_image_uris_by_region_id.items():
             region_metadata = next((r for r in MONITORED_REGIONS if r["id"] == region_id), {})
             instance_id = f"{region_id}_{acquisition_date_str.replace('-', '')}"
+            # Create a flat dictionary, as expected by predictor.py
             batch_input_instances.append({
                 "instance_id": instance_id,
                 "gcs_image_uri": gcs_image_uri,
                 "region_metadata": region_metadata,
-                "firms_hotspot_count_in_region": 5 # Mocked value
+                "firms_hotspot_count_in_region": 5 
             })
 
         timestamp_str = datetime.now(dt_timezone.utc).strftime('%Y%m%d%H%M%S%f')
@@ -257,9 +244,8 @@ if __name__ == "__main__":
 
         _log_json("INFO", "[LOCAL TEST] Submitting Vertex AI Batch Prediction job.")
         
-        # This part is identical to the cloud function logic
         model_resource_name = _get_vertex_ai_model_resource_name(vertex_ai_model_name, gcp_project_id, gcp_region)
-        # (The rest of the job submission code is copied from above)
+
         batch_job_output_gcs_prefix = f"gs://{GCS_BUCKET_NAME}/{GCS_BATCH_OUTPUT_DIR_PREFIX}"
         job_display_name = f"local_test_wildfire_batch_{timestamp_str}"
         input_config = BatchPredictionJob.InputConfig(instances_format="jsonl", gcs_source=GcsSource(uris=[input_gcs_uri]))
@@ -267,6 +253,7 @@ if __name__ == "__main__":
         machine_spec = MachineSpec(machine_type="n1-standard-4")
         dedicated_resources = BatchDedicatedResources(machine_spec=machine_spec, starting_replica_count=1, max_replica_count=5)
         batch_prediction_job_resource = BatchPredictionJob(display_name=job_display_name, model=model_resource_name, input_config=input_config, output_config=output_config, dedicated_resources=dedicated_resources, service_account=f"fire-app-vm-service-account@{gcp_project_id}.iam.gserviceaccount.com")
+        
         client_options = {"api_endpoint": f"{gcp_region}-aiplatform.googleapis.com"}
         job_service_client = JobServiceClient(client_options=client_options)
         parent_path = f"projects/{gcp_project_id}/locations/{gcp_region}"
