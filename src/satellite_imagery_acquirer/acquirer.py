@@ -7,24 +7,12 @@ import json # For structured logging of dicts
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
-# Import MONITORED_REGIONS and GCS_BUCKET_NAME from the common config file
-# from src.common.config import MONITORED_REGIONS # Not directly used, passed as arg
-from src.common.config import GCS_BUCKET_NAME # Used in __main__
+from src.common.config import GCS_BUCKET_NAME
 
 # --- Configuration ---
-# GEE Project ID for export (Optional, if using custom projects for GEE assets)
-# For most use cases, GEE is initialized with your GCP project's credentials.
-# GEE_PROJECT_ID = os.environ.get("GCP_PROJECT_ID") # If needed explicitly
-
-# Output directory within GCS bucket for raw imagery
 GCS_IMAGE_OUTPUT_PREFIX = "raw_satellite_imagery/"
-
-# Default image collection and filters
-# Sentinel-2 Level-2A is a good choice for visible light imagery
-# with atmospheric correction.
-# See: https://developers.google.com/earth-engine/datasets/catalog/COPERNICUS_S2_SR
-SENTINEL2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED" # Surface Reflectance
-CLOUD_COVER_THRESHOLD = 20 # Max percentage of cloud cover allowed
+SENTINEL2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
+CLOUD_COVER_THRESHOLD = 20 # Still useful for pre-filtering before the median
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -77,69 +65,51 @@ class SatelliteImageryAcquirer:
 
     def _get_latest_composite_image(self, bbox: List[float], date_start: str, date_end: str) -> Optional[ee.Image]:
         """
-        Retrieves the latest cloud-filtered Sentinel-2 composite image for a given bbox and date range.
-
-        Args:
-            bbox (List[float]): Bounding box [min_lon, min_lat, max_lon, max_lat].
-            date_start (str): Start date in 'YYYY-MM-DD' format.
-            date_end (str): End date in 'YYYY-MM-DD' format (exclusive).
-
-        Returns:
-            Optional[ee.Image]: An Earth Engine Image object or None if no suitable image is found.
+        Retrieves a median composite image for a given bbox and date range.
+        This is more robust against gaps and clouds than taking the .first() image.
         """
         try:
             geometry = ee.Geometry.Rectangle(bbox)
 
+            # 1. Filter the collection by date, location, and a reasonable cloud cover.
             collection = ee.ImageCollection(SENTINEL2_COLLECTION) \
                 .filterDate(date_start, date_end) \
                 .filterBounds(geometry) \
                 .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_COVER_THRESHOLD))
 
-            image = collection.sort('system:time_start', False).sort('CLOUDY_PIXEL_PERCENTAGE').first()
-
-            if image is None or image.bandNames().size().getInfo() == 0:
-                _log_json("WARNING", "No suitable image found for the specified region and date range after filtering.",
+            # 2. Check if the collection is empty *before* creating the median composite.
+            image_count = collection.size().getInfo()
+            if image_count == 0:
+                _log_json("WARNING", "No suitable images found in the date range to create a composite.",
                           bbox=bbox, date_start=date_start, date_end=date_end, cloud_cover_threshold=CLOUD_COVER_THRESHOLD)
                 return None
+            _log_json("INFO", f"Found {image_count} images in date range to create a median composite.")
 
-            _log_json("INFO", "Found a GEE image for processing.",
-                      image_id=image.get('system:index').getInfo(),
-                      cloud_percentage=image.get('CLOUDY_PIXEL_PERCENTAGE').getInfo(),
-                      image_date=datetime.fromtimestamp(image.get('system:time_start').getInfo() / 1000).strftime('%Y-%m-%d'))
+            # 3. Create the median composite. This operation is powerful.
+            # It takes all images in the collection and computes the median value for each pixel.
+            median_composite = collection.median()
 
+            # Ensure the resulting composite has the bands we need.
             rgb_bands = ['B4', 'B3', 'B2']
-            available_bands = image.bandNames().getInfo()
+            available_bands = median_composite.bandNames().getInfo()
             if not all(band in available_bands for band in rgb_bands):
-                _log_json("ERROR", "Selected GEE image is missing one or more required RGB bands (B4, B3, B2).",
-                          image_id=image.get('system:index').getInfo(), available_bands=available_bands)
+                _log_json("ERROR", "Resulting median composite is missing RGB bands.", available_bands=available_bands)
                 return None
 
-            rgb_image = image.select(rgb_bands)
+            # Scale the image for export as an 8-bit visual.
+            rgb_image = median_composite.select(rgb_bands)
             rgb_image_scaled = rgb_image.unitScale(0, 10000).multiply(255).toByte()
 
             return rgb_image_scaled
-        except ee.EEException as e:
-            _log_json("ERROR", "GEE error retrieving composite image.",
-                      bbox=bbox, date_start=date_start, date_end=date_end, error=str(e))
-            return None
+
         except Exception as e:
-             _log_json("ERROR", "Unexpected error retrieving composite image from GEE.",
+            _log_json("ERROR", "An unexpected error occurred in GEE while creating composite image.",
                       bbox=bbox, date_start=date_start, date_end=date_end, error=str(e), error_type=type(e).__name__)
-             return None
+            return None
 
     def acquire_and_export_imagery(self, monitored_regions: List[Dict[str, Any]], acquisition_date: Optional[str] = None) -> Dict[str, str]:
         """
         Acquires satellite imagery for each monitored region and exports it to GCS.
-
-        Args:
-            monitored_regions (List[Dict[str, Any]]): List of region dictionaries
-                                                    with 'id' and 'bbox'.
-            acquisition_date (Optional[str]): The target date for imagery in 'YYYY-MM-DD' format.
-                                              If None, defaults to yesterday to ensure data availability.
-
-        Returns:
-            Dict[str, str]: A dictionary mapping monitored_region_id to its GCS image URI.
-                            URIs are for *pending* exports. An empty dict if all fail.
         """
         if acquisition_date:
             try:
@@ -151,18 +121,25 @@ class SatelliteImageryAcquirer:
             target_date_obj = datetime.utcnow() - timedelta(days=1)
             acquisition_date = target_date_obj.strftime('%Y-%m-%d')
 
-        date_start_str = target_date_obj.strftime('%Y-%m-%d')
-        date_end_str = (target_date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+        # --- THE COMPROMISE: A 3-DAY LOOKBACK WINDOW ---
+        # This is a great balance between recency and data quality.
+        date_end_obj = target_date_obj + timedelta(days=1) # End of window is still yesterday
+        date_start_obj = target_date_obj - timedelta(days=2) # Start of window is 2 days before
+        date_start_str = date_start_obj.strftime('%Y-%m-%d')
+        date_end_str = date_end_obj.strftime('%Y-%m-%d')
+        # --- END MODIFICATION ---
 
         _log_json("INFO", "Starting satellite imagery acquisition.",
-                  target_date_for_imagery=date_start_str, gee_date_filter_range=f"[{date_start_str}, {date_end_str})")
+                  target_date_for_imagery=acquisition_date,
+                  gee_date_filter_range=f"[{date_start_str}, {date_end_str})") # Log the new 3-day range
 
         exported_image_uris: Dict[str, str] = {}
 
         for region in monitored_regions:
             region_id = region["id"]
             region_bbox = region["bbox"]
-            image_filename_stem = f"wildfire_imagery_{region_id}_{date_start_str.replace('-', '')}"
+            # The filename still uses the single target date for consistency.
+            image_filename_stem = f"wildfire_imagery_{region_id}_{acquisition_date.replace('-', '')}"
             gcs_file_prefix_for_export = f"{GCS_IMAGE_OUTPUT_PREFIX}{image_filename_stem}"
             expected_gcs_image_uri = f"gs://{self.gcs_bucket_name}/{gcs_file_prefix_for_export}.tif"
 
@@ -171,8 +148,7 @@ class SatelliteImageryAcquirer:
             image_to_export = self._get_latest_composite_image(region_bbox, date_start_str, date_end_str)
 
             if image_to_export is None:
-                _log_json("WARNING", f"Skipping imagery export for region '{region_id}' as no suitable GEE image was found.",
-                          region_id=region_id)
+                _log_json("WARNING", f"Skipping export for region '{region_id}': no suitable GEE image found to create composite.", region_id=region_id)
                 continue
 
             try:
@@ -190,7 +166,7 @@ class SatelliteImageryAcquirer:
                 )
                 task.start()
                 _log_json("INFO", "GEE export task initiated.",
-                          region_id=region_id, task_id=task.id, task_status=task.status(),
+                          region_id=region_id, task_id=task.id,
                           target_gcs_uri=expected_gcs_image_uri)
 
                 exported_image_uris[region_id] = expected_gcs_image_uri
@@ -205,7 +181,7 @@ class SatelliteImageryAcquirer:
         if not exported_image_uris:
             _log_json("WARNING", "No GEE export tasks were successfully initiated for any region.")
         else:
-            _log_json("INFO", "Satellite imagery acquisition process complete. Review GEE Task Manager for export status.",
+            _log_json("INFO", "Satellite imagery acquisition process complete. Review GEE Task Manager for status.",
                       total_tasks_initiated=len(exported_image_uris),
                       initiated_uris=exported_image_uris)
         return exported_image_uris
