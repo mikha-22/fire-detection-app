@@ -77,7 +77,7 @@ class WildfirePredictor(Predictor):
 
         # --- THE FIX: Increase Pillow's image size limit ---
         # Set a new limit of 150 million pixels to handle large satellite images.
-        Image.MAX_IMAGE_PIXELS = 150_000_000
+        Image.MAX_IMAGE_PIXELS = 2_000_000_000
         # ---------------------------------------------------
 
         if "instances" in prediction_input and isinstance(prediction_input["instances"], list) and prediction_input["instances"]:
