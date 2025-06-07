@@ -153,7 +153,7 @@ def result_processor_cloud_function(event: Dict, context: Dict):
         try:
             batch_job = aiplatform.BatchPredictionJob(batch_prediction_job_name=job_resource_name)
             output_gcs_uri_prefix = batch_job.output_info.gcs_output_directory
-            job_state = str(batch_job.state)
+            job_state = batch_job.state.name
             _log_json("INFO", "Vertex AI Batch Job details fetched.", job_name=job_resource_name, job_state=job_state, output_gcs_prefix=output_gcs_uri_prefix)
         except Exception as api_err:
             _log_json("ERROR", f"Failed to fetch BatchPredictionJob details from API for job '{job_resource_name}'.", error=str(api_err))
