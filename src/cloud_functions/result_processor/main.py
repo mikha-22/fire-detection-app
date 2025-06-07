@@ -4,10 +4,9 @@ import os
 import logging
 import json
 import io
-import time  # Import the time module for sleeping
+from datetime import datetime, timedelta
 import pandas as pd
-from datetime import datetime
-from google.cloud import storage, aiplatform
+from google.cloud import storage
 import base64
 from typing import Dict, Any, List, Optional
 
@@ -124,65 +123,33 @@ def result_processor_cloud_function(event: Dict, context: Dict):
     _log_json("INFO", "Result Processor Cloud Function triggered.")
 
     gcp_project_id = os.environ.get("GCP_PROJECT_ID")
-    gcp_region = os.environ.get("GCP_REGION")
     firms_api_key = os.environ.get("FIRMS_API_KEY")
 
-    if not all([gcp_project_id, gcp_region, firms_api_key, GCS_BUCKET_NAME]):
-        missing_vars = [var for var, val in {"GCP_PROJECT_ID": gcp_project_id, "GCP_REGION": gcp_region, "FIRMS_API_KEY": firms_api_key, "GCS_BUCKET_NAME": GCS_BUCKET_NAME}.items() if not val]
+    if not all([gcp_project_id, firms_api_key, GCS_BUCKET_NAME]):
+        missing_vars = [var for var, val in {"GCP_PROJECT_ID": gcp_project_id, "FIRMS_API_KEY": firms_api_key, "GCS_BUCKET_NAME": GCS_BUCKET_NAME}.items() if not val]
         _log_json("CRITICAL", "Missing required configurations.", missing_variables=missing_vars)
         raise ValueError(f"Missing required configurations: {', '.join(missing_vars)}")
 
     storage_client = storage.Client(project=gcp_project_id)
-    aiplatform.init(project=gcp_project_id, location=gcp_region)
-
-    if 'data' not in event:
-        _log_json("ERROR", "Pub/Sub message 'data' field is missing.")
-        raise ValueError("Invalid Pub/Sub message: 'data' field missing.")
     
     try:
-        message_data_str = base64.b64decode(event['data']).decode('utf-8')
-        message_data = json.loads(message_data_str)
-
-        job_id = message_data.get("resource", {}).get("labels", {}).get("job_id")
-        if not job_id:
-            _log_json("ERROR", "Could not find 'job_id' in the received log message payload.", payload=message_data)
-            raise ValueError("Payload is missing the required job_id.")
-
-        _log_json("INFO", f"Extracted job_id '{job_id}' from trigger message. Trusting sink filter and proceeding.")
-
-        _log_json("INFO", "Waiting for 60 seconds to allow for API consistency...")
-        time.sleep(60)
-
-        job_resource_name = f"projects/{gcp_project_id}/locations/{gcp_region}/batchPredictionJobs/{job_id}"
+        # --- THE NEW SIMPLIFIED LOGIC: Calculate the predictable path ---
+        # The job runs daily for yesterday's data. We calculate the same date
+        # that the PipelineInitiatorCF used for the folder name.
+        target_date = datetime.utcnow() - timedelta(days=1)
+        acquisition_date_str = target_date.strftime('%Y-%m-%d')
         
-        try:
-            batch_job = aiplatform.BatchPredictionJob(batch_prediction_job_name=job_resource_name)
-            output_gcs_uri_prefix = batch_job.output_info.gcs_output_directory
-            _log_json("INFO", "Successfully fetched job details to get output path.", job_name=job_resource_name, output_gcs_prefix=output_gcs_uri_prefix)
-        except Exception as api_err:
-            _log_json("ERROR", f"Failed to fetch BatchPredictionJob details from API for job '{job_resource_name}'.", error=str(api_err))
-            raise
+        output_gcs_uri_prefix = f"gs://{GCS_BUCKET_NAME}/vertex_ai_batch_outputs/{acquisition_date_str}/"
+        
+        _log_json("INFO", "Constructed predictable GCS path to process.", path=output_gcs_uri_prefix)
 
-        if not output_gcs_uri_prefix:
-            _log_json("ERROR", "GCS URI prefix missing from fetched job details. Cannot proceed.", job_name=job_resource_name)
-            raise ValueError("Missing GCS URI prefix.")
-
-        report_acquisition_date_str = "UnknownDate"
+        report_acquisition_date_str = acquisition_date_str
 
         all_ai_predictions_by_instance_id = _parse_vertex_ai_batch_output(storage_client, output_gcs_uri_prefix)
         
         if not all_ai_predictions_by_instance_id:
-            _log_json("WARNING", "No AI predictions found or parsed. Exiting gracefully.")
+            _log_json("WARNING", "No AI predictions found or parsed in the expected path. The upstream job may have failed.", path=output_gcs_uri_prefix)
             return
-        else:
-            first_instance_id = next(iter(all_ai_predictions_by_instance_id.keys()), None)
-            if first_instance_id and '_' in first_instance_id:
-                try:
-                    date_part = first_instance_id.split('_')[-1]
-                    report_acquisition_date_str = datetime.strptime(date_part, '%Y%m%d').strftime('%Y-%m-%d')
-                    _log_json("INFO", f"Derived report date from AI results: {report_acquisition_date_str}")
-                except (ValueError, IndexError):
-                    _log_json("WARNING", "Could not parse date from first AI instance_id.", first_instance_id=first_instance_id)
 
         firms_retriever = FirmsDataRetriever(api_key=firms_api_key, base_url=FIRMS_API_BASE_URL, sensors=FIRMS_SENSORS)
         relevant_firms_df = firms_retriever.get_and_filter_firms_data(MONITORED_REGIONS)
@@ -308,4 +275,4 @@ def result_processor_cloud_function(event: Dict, context: Dict):
 # --- Local Testing Entrypoint ---
 if __name__ == "__main__":
     print("--- Local test for Result Processor Cloud Function ---")
-    print("NOTE: This local test harness needs to be updated to simulate the new log-based trigger.")
+    print("NOTE: This local test harness needs to be updated to simulate the new predictable path logic.")
