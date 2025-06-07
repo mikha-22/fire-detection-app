@@ -113,3 +113,4 @@ The data flow is event-driven, primarily orchestrated by the two Cloud Functions
 │   └── satellite_imagery_acquirer/
 │       └── acquirer.py         # Component 2: Acquires satellite imagery via Google Earth Engine
 └── README.md                     # This file
+
