@@ -1,0 +1,10 @@
+# New requirements for the Incident Detector function
+requests
+pandas
+google-cloud-storage
+google-cloud-pubsub-v1
+
+# Geospatial and Machine Learning libraries
+geopandas
+scikit-learn
+shapely

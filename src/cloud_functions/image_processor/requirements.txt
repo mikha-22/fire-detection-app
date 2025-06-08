@@ -1,0 +1,7 @@
+      
+# Requirements for the Image Processor function
+google-cloud-storage
+google-cloud-aiplatform
+earthengine-api
+
+    

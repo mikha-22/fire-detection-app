@@ -1,0 +1,35 @@
+# cloudbuild-incident-detector.yaml
+steps:
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    # Copy all necessary files into the staging directory
+    mkdir -p deploy_staging/incident_detector
+    cp src/cloud_functions/incident_detector/main.py deploy_staging/incident_detector/main.py
+    cp src/cloud_functions/incident_detector/requirements.txt deploy_staging/incident_detector/requirements.txt
+    # IMPORTANT: Copy the shared 'src' directory so imports and the shapefile are included
+    cp -r src deploy_staging/incident_detector/src
+
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: 'gcloud'
+  args:
+  - 'functions'
+  - 'deploy'
+  - 'IncidentDetectorCF'  # <-- New function name
+  - '--gen2'
+  - '--runtime=python311'
+  - '--region=asia-southeast2'
+  - '--source=./deploy_staging/incident_detector' # <-- New source path
+  - '--entry-point=incident_detector_cloud_function' # <-- New entry point
+  - '--trigger-topic=wildfire-pipeline-initiator' # <-- The trigger topic is the same
+  - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
+  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,FIRMS_API_KEY=0331973a7ee830ca7f026493faaa367a'
+  - '--timeout=540s'
+  - '--memory=2GiB' # Increased memory for geospatial processing
+  - '--project=haryo-kebakaran'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: '1200s'

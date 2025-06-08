@@ -7,7 +7,6 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import json
-import ee # <-- ADDED IMPORT
 
 # Import MONITORED_REGIONS from the common config file
 from src.common.config import MONITORED_REGIONS
@@ -36,56 +35,6 @@ def _log_json(severity: str, message: str, **kwargs):
     print(json.dumps(log_entry))
 
 
-# --- NEW FUNCTION TO CHECK PEATLANDS ---
-def _check_peatland_status(firms_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Enriches a DataFrame of FIRMS hotspots with a boolean flag indicating if they
-    are on peatland, using a GEE peatland map.
-    """
-    if firms_df.empty:
-        firms_df['is_on_peatland'] = 0
-        return firms_df
-
-    try:
-        # Initialize Earth Engine.
-        ee.Initialize(project=os.environ.get("GCP_PROJECT_ID"))
-
-        # --- IMPORTANT ---
-        # Load a peatland map for Indonesia from your GEE Assets.
-        # You must upload your own GeoTIFF and replace the path below.
-        peat_map = ee.Image("projects/ee-haryo-kebakaran/assets/peat_map_indonesia").select('b1')
-
-        # Create ee.Feature points from the DataFrame latitudes and longitudes
-        points = [ee.Geometry.Point(lon, lat) for lon, lat in zip(firms_df['longitude'], firms_df['latitude'])]
-        ee_points = ee.FeatureCollection(points)
-
-        # Use reduceRegions to get the peatland value (1 or 0) for each point.
-        results = peat_map.reduceRegions(collection=ee_points, reducer=ee.Reducer.first(), scale=100).getInfo()
-
-        is_on_peat = []
-        # The result features are not guaranteed to be in the same order, so we build a lookup.
-        # This is a simplification; a robust solution would match coordinates. For this use case, order is often preserved.
-        for feature in results['features']:
-            is_on_peat.append(1 if feature['properties'].get('first') == 1 else 0)
-
-        # Ensure the list length matches the DataFrame length
-        if len(is_on_peat) == len(firms_df):
-            firms_df['is_on_peatland'] = is_on_peat
-            _log_json("INFO", "Successfully enriched FIRMS data with peatland status.",
-                      peat_hotspots_found=sum(is_on_peat))
-        else:
-            _log_json("ERROR", "Mismatch between FIRMS points and GEE results. Defaulting to no peatland.",
-                      firms_count=len(firms_df), gee_results_count=len(is_on_peat))
-            firms_df['is_on_peatland'] = 0
-
-    except Exception as e:
-        _log_json("ERROR", "Failed to enrich FIRMS data with peatland status. Proceeding without it.", error=str(e))
-        # If this process fails, we still want to continue, so we just add a default column.
-        firms_df['is_on_peatland'] = 0
-
-    return firms_df
-
-
 class FirmsDataRetriever:
     """
     Component 1: Fetches active fire data from NASA FIRMS API (using /api/area/)
@@ -107,6 +56,8 @@ class FirmsDataRetriever:
     def _fetch_firms_data(self, sensor: str) -> Optional[pd.DataFrame]:
         """
         Fetches FIRMS data for a specific sensor for the last 24 hours (yesterday's data).
+        Uses the /api/area/ endpoint.
+        Includes debug print for raw CSV.
         """
         yesterday = datetime.utcnow() - timedelta(days=1)
         date_str = yesterday.strftime('%Y-%m-%d')
@@ -117,19 +68,30 @@ class FirmsDataRetriever:
                   sensor=sensor, date_for_data=date_str, endpoint=endpoint)
 
         try:
-            response = requests.get(endpoint, timeout=60)
+            response = requests.get(endpoint, timeout=60) # Increased timeout
 
             if "Invalid API call" in response.text:
-                _log_json("ERROR", "FIRMS API (/api/area/) returned 'Invalid API call'.",
-                          api_response_snippet=response.text[:200], status_code=response.status_code, sensor=sensor)
+                _log_json("ERROR", "FIRMS API (/api/area/) returned 'Invalid API call'. Check API key, sensor name, or endpoint structure.",
+                          api_response_snippet=response.text[:200], status_code=response.status_code, sensor=sensor, endpoint=endpoint)
                 return None
+
             response.raise_for_status()
+
             if not response.text.strip() or response.text.startswith("No fire data found"):
                 _log_json("WARNING", "No fire data found or empty response from FIRMS API for query.",
-                          sensor=sensor, endpoint=endpoint)
+                          sensor=sensor, endpoint=endpoint, response_text_snippet=response.text[:100])
                 return None
+
+            # --- DEBUG PRINT START ---
+            print(f"\n--- RAW FIRMS CSV Output (first 5 lines) for sensor: {sensor} ---")
+            lines = response.text.splitlines()
+            for i in range(min(5, len(lines))): # Print header + up to 4 data lines
+                print(lines[i])
+            print("--- END RAW FIRMS CSV Output ---\n")
+            # --- DEBUG PRINT END ---
+
             if "Error" in response.text or "Access Denied" in response.text:
-                _log_json("ERROR", "FIRMS API returned an error message in response body.",
+                _log_json("ERROR", "FIRMS API returned an error message in response body despite 200 OK.",
                           api_response_snippet=response.text[:200], status_code=response.status_code, sensor=sensor)
                 return None
 
@@ -137,84 +99,150 @@ class FirmsDataRetriever:
             _log_json("INFO", "Successfully fetched FIRMS data for sensor using /api/area/.",
                       sensor=sensor, rows_fetched=len(df))
             return df
+        except requests.exceptions.HTTPError as e:
+            _log_json("ERROR", "HTTP error fetching FIRMS data (/api/area/).",
+                      error=str(e), status_code=e.response.status_code if e.response else 'N/A', sensor=sensor)
+            return None
+        except requests.exceptions.ConnectionError as e:
+            _log_json("ERROR", "Connection error fetching FIRMS data (/api/area/).", error=str(e), sensor=sensor)
+            return None
+        except requests.exceptions.Timeout as e:
+            _log_json("ERROR", "Timeout fetching FIRMS data (/api/area/).", error=str(e), sensor=sensor)
+            return None
+        except requests.exceptions.RequestException as e:
+            _log_json("ERROR", "An unexpected requests error occurred (/api/area/).", error=str(e), sensor=sensor)
+            return None
+        except pd.errors.EmptyDataError:
+            _log_json("WARNING", "FIRMS CSV data is empty or malformed after successful fetch (pd.errors.EmptyDataError).", sensor=sensor)
+            return None
         except Exception as e:
-            _log_json("ERROR", "An unexpected error occurred during FIRMS data fetch or parsing.",
+            _log_json("ERROR", "An unexpected error occurred during FIRMS data fetch or parsing (/api/area/).",
                       error_type=type(e).__name__, error=str(e), sensor=sensor)
             return None
 
     def get_and_filter_firms_data(self, monitored_regions: List[Dict[str, Any]]) -> pd.DataFrame:
         """
-        Fetches, filters, and enriches FIRMS data for all specified sensors (for yesterday).
+        Fetches FIRMS data. If monitored_regions is provided, it filters by those
+        bounding boxes. If it's empty, it returns the full global dataset.
         """
         all_firms_data = []
+
         for sensor in self.sensors:
             df_sensor = self._fetch_firms_data(sensor)
             if df_sensor is not None and not df_sensor.empty:
                 all_firms_data.append(df_sensor)
 
-        output_cols_with_peat = [
+        empty_df_for_return = pd.DataFrame(columns=[
             'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
-            'frp', 'daynight', 'satellite', 'monitored_region_id', 'is_on_peatland'
-        ]
-        empty_df_for_return = pd.DataFrame(columns=output_cols_with_peat)
+            'frp', 'daynight', 'satellite', 'monitored_region_id'
+        ])
 
         if not all_firms_data:
-            _log_json("WARNING", "No FIRMS data retrieved from any sensor.")
+            _log_json("WARNING", "No FIRMS data retrieved from any sensor after attempts using /api/area/.")
             return empty_df_for_return
 
         combined_df = pd.concat(all_firms_data, ignore_index=True)
+        
+        # --- MODIFIED LOGIC BLOCK ---
+        # If no regions are specified, return the full, confidence-filtered global dataset.
+        if not monitored_regions:
+            _log_json("INFO", "No regions provided, returning global FIRMS dataset after confidence filter.")
+            if 'confidence' in combined_df.columns:
+                combined_df['confidence'] = combined_df['confidence'].astype(str).str.lower()
+                confidence_values_to_keep = ['h', 'n']
+                return combined_df[combined_df['confidence'].isin(confidence_values_to_keep)].copy()
+            return combined_df
+        # --- END MODIFIED LOGIC BLOCK ---
+
         initial_rows = len(combined_df)
         _log_json("INFO", "Combined raw FIRMS data from all sensors.", total_hotspots_before_filter=initial_rows)
 
-        required_cols = ['latitude', 'longitude', 'acq_date', 'acq_time', 'confidence', 'frp', 'daynight', 'satellite']
+        # Ensure required columns exist, even if they are all None initially from some sensors.
+        required_cols = [
+            'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
+            'frp', 'daynight', 'satellite'
+        ]
         for col in required_cols:
             if col not in combined_df.columns:
+                _log_json("WARNING", f"Missing expected column in combined FIRMS data: {col}. Adding with None.", column=col)
                 combined_df[col] = None
 
         if 'confidence' in combined_df.columns:
             combined_df['confidence'] = combined_df['confidence'].astype(str).str.lower()
+            
             confidence_values_to_keep = ['h', 'n']
-            filtered_by_confidence_df = combined_df[combined_df['confidence'].isin(confidence_values_to_keep)].copy()
+            filtered_by_confidence_df = combined_df[
+                combined_df['confidence'].isin(confidence_values_to_keep)
+            ].copy()
+            
             _log_json("INFO", "Filtered FIRMS data by confidence (kept 'h' or 'n').",
-                      rows_after_confidence_filter=len(filtered_by_confidence_df))
+                      original_rows_before_confidence_filter=initial_rows,
+                      rows_after_confidence_filter=len(filtered_by_confidence_df),
+                      confidence_values_kept=confidence_values_to_keep)
         else:
+            _log_json("WARNING", "No 'confidence' column found in FIRMS data. Skipping confidence filter.")
             filtered_by_confidence_df = combined_df.copy()
 
         if filtered_by_confidence_df.empty:
+            _log_json("INFO", "No FIRMS hotspots with 'h' or 'n' confidence after filtering.")
             return empty_df_for_return
 
         filtered_hotspots_by_region = []
         for region in monitored_regions:
             region_id = region["id"]
             min_lon, min_lat, max_lon, max_lat = region["bbox"]
-            temp_df = filtered_by_confidence_df.copy()
-            temp_df['latitude'] = pd.to_numeric(temp_df['latitude'], errors='coerce')
-            temp_df['longitude'] = pd.to_numeric(temp_df['longitude'], errors='coerce')
-            temp_df.dropna(subset=['latitude', 'longitude'], inplace=True)
 
-            region_df = temp_df[
-                (temp_df['latitude'] >= min_lat) & (temp_df['latitude'] <= max_lat) &
-                (temp_df['longitude'] >= min_lon) & (temp_df['longitude'] <= max_lon)
+            temp_df_for_region_filter = filtered_by_confidence_df.copy()
+            
+            temp_df_for_region_filter['latitude'] = pd.to_numeric(temp_df_for_region_filter['latitude'], errors='coerce')
+            temp_df_for_region_filter['longitude'] = pd.to_numeric(temp_df_for_region_filter['longitude'], errors='coerce')
+            
+            temp_df_for_region_filter.dropna(subset=['latitude', 'longitude'], inplace=True)
+
+            region_df = temp_df_for_region_filter[
+                (temp_df_for_region_filter['latitude'] >= min_lat) &
+                (temp_df_for_region_filter['latitude'] <= max_lat) &
+                (temp_df_for_region_filter['longitude'] >= min_lon) &
+                (temp_df_for_region_filter['longitude'] <= max_lon)
             ].copy()
 
             if not region_df.empty:
                 region_df['monitored_region_id'] = region_id
                 filtered_hotspots_by_region.append(region_df)
+                _log_json("INFO", "Found FIRMS hotspots in monitored region.", region_id=region_id, count=len(region_df))
+            else:
+                _log_json("INFO", "No FIRMS hotspots found in monitored region.", region_id=region_id)
 
         if not filtered_hotspots_by_region:
+            _log_json("INFO", "No FIRMS hotspots found across all monitored regions after spatial filtering.")
             return empty_df_for_return
 
         final_df = pd.concat(filtered_hotspots_by_region, ignore_index=True)
 
-        # --- MODIFIED LOGIC: ENRICH WITH PEATLAND DATA ---
-        final_df = _check_peatland_status(final_df)
-        # --- END MODIFICATION ---
+        output_columns = [
+            'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
+            'frp', 'daynight', 'satellite', 'monitored_region_id'
+        ]
+        
+        for col in output_columns:
+            if col not in final_df.columns:
+                final_df[col] = None
+        
+        final_df = final_df[output_columns]
 
-        # Reorder and select final columns
-        final_output_columns = [col for col in output_cols_with_peat if col in final_df.columns]
-        final_df = final_df[final_output_columns]
+        final_df['latitude'] = pd.to_numeric(final_df['latitude'], errors='coerce')
+        final_df['longitude'] = pd.to_numeric(final_df['longitude'], errors='coerce')
+        final_df['frp'] = pd.to_numeric(final_df['frp'], errors='coerce')
+        
+        final_df['acq_date'] = pd.to_datetime(final_df['acq_date'], errors='coerce').dt.strftime('%Y-%m-%d')
+        final_df['acq_time'] = final_df['acq_time'].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(4)
+        
+        final_df['confidence'] = final_df['confidence'].astype(str)
+        final_df['daynight'] = final_df['daynight'].astype(str)
+        final_df['satellite'] = final_df['satellite'].astype(str)
+        final_df['monitored_region_id'] = final_df['monitored_region_id'].astype(str)
 
-        _log_json("INFO", "FIRMS data retrieval, filtering, and enrichment complete.",
+        _log_json("INFO", "FIRMS data retrieval and filtering complete using /api/area/.",
                   total_filtered_hotspots=len(final_df))
         return final_df
 

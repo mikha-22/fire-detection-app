@@ -1,6 +1,0 @@
-# src/cloud_functions/result_processor/requirements.txt
-google-cloud-aiplatform
-google-cloud-storage
-pandas # For FirmsDataRetriever and for processing AI results (though AI results are now mainly JSON)
-Pillow # For MapVisualizer
-requests # For FirmsDataRetriever
