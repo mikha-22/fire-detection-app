@@ -12,24 +12,23 @@ Global configuration settings for the Wildfire Detection System.
 # - 'description': A brief description of the region.
 MONITORED_REGIONS = [
     {
-        "id": "sierra_nf_section", # New ID for the smaller region
-        "name": "Sierra National Forest Section (1x1 Test)",
-        "bbox": [-119.5, 37.0, -118.5, 38.0],  # [min_lon, min_lat, max_lon, max_lat]
-        "description": "A small 1x1 degree test region in Sierra National Forest, California."
+        "id": "sumatra_riau",
+        "name": "Sumatra - Riau Province",
+        "bbox": [100.0, -1.0, 104.0, 2.0],
+        "description": "A primary hotspot. Covers the Kampar Peninsula and coastal peatlands frequently burned for agriculture."
+    },
+    {
+        "id": "kalimantan_tengah",
+        "name": "Central Kalimantan",
+        "bbox": [111.0, -3.5, 115.5, -0.5],
+        "description": "The highest density of peat fires in SE Asia, focused on the ex-Mega Rice Project area south of Palangkaraya."
+    },
+    {
+        "id": "sumatra_selatan",
+        "name": "South Sumatra",
+        "bbox": [103.5, -4.5, 106.5, -2.0],
+        "description": "Another major fire-prone area, targeting the extensive peatlands of the Ogan Komering Ilir (OKI) regency."
     }
-    # {
-    #     "id": "california_central", # Keeping original commented out for reference
-    #     "name": "Central California Wildfire Zone",
-    #     "bbox": [-122.0, 36.0, -118.0, 38.0],
-    #     "description": "A test region in Central California prone to wildfires."
-    # },
-    # { # Temporarily commented out for faster debugging
-    #     "id": "australia_southeast",
-    #     "name": "Southeast Australia Bushfire Zone",
-    #     "bbox": [140.0, -38.0, 153.0, -28.0],
-    #     "description": "A test region in Southeast Australia."
-    # }
-    # Add more regions as needed
 ]
 
 # Your Google Cloud Storage bucket name.
