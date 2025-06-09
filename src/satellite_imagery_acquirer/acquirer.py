@@ -12,7 +12,8 @@ from src.common.config import GCS_BUCKET_NAME
 # --- Configuration ---
 GCS_IMAGE_OUTPUT_PREFIX = "raw_satellite_imagery/"
 SENTINEL2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
-CLOUD_COVER_THRESHOLD = 20 # Still useful for pre-filtering before the median
+# --- MODIFICATION: Increased cloud tolerance ---
+CLOUD_COVER_THRESHOLD = 40 # Increased from 20 to 40 to be more flexible
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -51,6 +52,8 @@ class SatelliteImageryAcquirer:
         self.gcs_bucket_name = gcs_bucket_name
 
         try:
+            # Use a service account for authentication in a deployed environment
+            # Ensure the service account has the necessary Earth Engine API permissions.
             ee.Initialize(project=os.environ.get("GCP_PROJECT_ID"))
             _log_json("INFO", "Google Earth Engine initialized successfully.", gcp_project_id=os.environ.get("GCP_PROJECT_ID"))
         except ee.EEException as e:
@@ -121,17 +124,17 @@ class SatelliteImageryAcquirer:
             target_date_obj = datetime.utcnow() - timedelta(days=1)
             acquisition_date = target_date_obj.strftime('%Y-%m-%d')
 
-        # --- THE COMPROMISE: A 3-DAY LOOKBACK WINDOW ---
-        # This is a great balance between recency and data quality.
+        # --- MODIFICATION: A 14-DAY LOOKBACK WINDOW ---
+        # Increased from 3 days to 14 to significantly increase the chance of finding cloud-free imagery.
         date_end_obj = target_date_obj + timedelta(days=1) # End of window is still yesterday
-        date_start_obj = target_date_obj - timedelta(days=2) # Start of window is 2 days before
+        date_start_obj = target_date_obj - timedelta(days=13) # Start of window is ~2 weeks before
         date_start_str = date_start_obj.strftime('%Y-%m-%d')
         date_end_str = date_end_obj.strftime('%Y-%m-%d')
         # --- END MODIFICATION ---
 
         _log_json("INFO", "Starting satellite imagery acquisition.",
                   target_date_for_imagery=acquisition_date,
-                  gee_date_filter_range=f"[{date_start_str}, {date_end_str})") # Log the new 3-day range
+                  gee_date_filter_range=f"[{date_start_str}, {date_end_str})")
 
         exported_image_uris: Dict[str, str] = {}
 
@@ -196,7 +199,7 @@ if __name__ == "__main__":
         _log_json("WARNING", "GCP_PROJECT_ID environment variable not set. GEE might use a default project. "
                              "Set it if you encounter permission issues or want to bill to a specific project.")
 
-    if GCS_BUCKET_NAME == "fire-app-bucket": # Replace with your actual bucket if different for testing
+    if GCS_BUCKET_NAME == "fire-app-bucket":
         _log_json("INFO", f"Using configured GCS_BUCKET_NAME: {GCS_BUCKET_NAME} for local test.")
     else:
         _log_json("ERROR", f"GCS_BUCKET_NAME in src/common/config.py ('{GCS_BUCKET_NAME}') "
