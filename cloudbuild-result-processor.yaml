@@ -1,17 +1,7 @@
 # cloudbuild-result-processor.yaml
 steps:
 - name: 'gcr.io/cloud-builders/gcloud'
-  entrypoint: 'bash'
-  args:
-  - '-c'
-  - |
-    # Create a staging area for deployment
-    mkdir -p deploy_staging/result_processor
-    # Copy the function's specific files
-    cp src/cloud_functions/result_processor/main.py deploy_staging/result_processor/main.py
-    cp src/cloud_functions/result_processor/requirements.txt deploy_staging/result_processor/requirements.txt
-    # IMPORTANT: Copy the shared 'src' directory so the visualizer can be imported
-    cp -r src deploy_staging/result_processor/src
+  # ... (entrypoint and args -c are unchanged) ...
 
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: 'gcloud'
@@ -20,17 +10,14 @@ steps:
   - 'deploy'
   - 'ResultProcessorCF'
   - '--gen2'
-  - '--runtime=python311'
-  - '--region=asia-southeast2'
-  - '--source=./deploy_staging/result_processor'
-  - '--entry-point=result_processor_cloud_function'
-  # This function is triggered by a new topic that receives logs from Vertex AI
-  - '--trigger-topic=wildfire-prediction-completed'
+  # ... (other args are unchanged) ...
   - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
   - '--set-env-vars=GCS_BUCKET_NAME=fire-app-bucket'
   - '--timeout=540s'
   - '--memory=2GiB'
   - '--project=haryo-kebakaran'
+  # --- ADD THIS LINE ---
+  - '--allow-unauthenticated'
 
 options:
   logging: CLOUD_LOGGING_ONLY
