@@ -1,7 +1,16 @@
 # cloudbuild-image-processor.yaml
 steps:
 - name: 'gcr.io/cloud-builders/gcloud'
-  # ... (entrypoint and args -c are unchanged) ...
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    # Update paths to match new directory name
+    mkdir -p deploy_staging/image_processor
+    cp src/cloud_functions/image_processor/main.py deploy_staging/image_processor/main.py
+    cp src/cloud_functions/image_processor/requirements.txt deploy_staging/image_processor/requirements.txt
+    # Copy the shared 'src' directory so the acquirer can be imported
+    cp -r src deploy_staging/image_processor/src
 
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: 'gcloud'
@@ -10,12 +19,17 @@ steps:
   - 'deploy'
   - 'ImageProcessorCF'
   - '--gen2'
-  # ... (other args are unchanged) ...
-  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,GCS_BUCKET_NAME=fire-app-bucket,VERTEX_AI_OBJECT_DETECTION_MODEL=wildfire-cpr-predictor-model'
+  - '--runtime=python311'
+  - '--region=asia-southeast2'
+  - '--source=./deploy_staging/image_processor'
+  - '--entry-point=image_processor_cloud_function'
+  - '--trigger-topic=wildfire-cluster-detected'
+  - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
+  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,GCS_BUCKET_NAME=fire-app-bucket,VERTEX_AI_MODEL_NAME=wildfire-cpr-predictor-model'
   - '--timeout=540s'
   - '--memory=2GiB'
   - '--project=haryo-kebakaran'
-  # --- ADD THIS LINE ---
+  # This flag allows the Pub/Sub service to trigger the function.
   - '--allow-unauthenticated'
 
 options:

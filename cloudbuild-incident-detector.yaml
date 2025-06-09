@@ -1,7 +1,16 @@
 # cloudbuild-incident-detector.yaml
 steps:
 - name: 'gcr.io/cloud-builders/gcloud'
-  # ... (entrypoint and args -c are unchanged) ...
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    # Copy all necessary files into the staging directory
+    mkdir -p deploy_staging/incident_detector
+    cp src/cloud_functions/incident_detector/main.py deploy_staging/incident_detector/main.py
+    cp src/cloud_functions/incident_detector/requirements.txt deploy_staging/incident_detector/requirements.txt
+    # IMPORTANT: Copy the shared 'src' directory so imports and the shapefile are included
+    cp -r src deploy_staging/incident_detector/src
 
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: 'gcloud'
@@ -16,11 +25,12 @@ steps:
   - '--entry-point=incident_detector_cloud_function'
   - '--trigger-topic=wildfire-pipeline-initiator'
   - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
+  # IMPORTANT: The FIRMS_API_KEY is still hardcoded here. You mentioned you will move this to Secret Manager later.
   - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,FIRMS_API_KEY=0331973a7ee830ca7f026493faaa367a'
   - '--timeout=540s'
   - '--memory=2GiB'
   - '--project=haryo-kebakaran'
-  # --- ADD THIS LINE AT THE END OF THE ARGS ---
+  # This flag allows the Pub/Sub service to trigger the function.
   - '--allow-unauthenticated'
 
 options:
