@@ -1,15 +1,12 @@
-# cloudbuild-image-processor.yaml
 steps:
 - name: 'gcr.io/cloud-builders/gcloud'
   entrypoint: 'bash'
   args:
   - '-c'
   - |
-    # Update paths to match new directory name
     mkdir -p deploy_staging/image_processor
     cp src/cloud_functions/image_processor/main.py deploy_staging/image_processor/main.py
     cp src/cloud_functions/image_processor/requirements.txt deploy_staging/image_processor/requirements.txt
-    # Copy the shared 'src' directory so the acquirer can be imported
     cp -r src deploy_staging/image_processor/src
 
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -29,8 +26,10 @@ steps:
   - '--timeout=540s'
   - '--memory=2GiB'
   - '--project=haryo-kebakaran'
-  # This flag allows the Pub/Sub service to trigger the function.
   - '--allow-unauthenticated'
+
+# This section tells Cloud Build to use YOUR service account for the deployment.
+serviceAccount: 'projects/haryo-kebakaran/serviceAccounts/fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
 
 options:
   logging: CLOUD_LOGGING_ONLY
