@@ -88,7 +88,13 @@ def image_processor_cloud_function(event, context):
         model = model_list[0]
 
         # The input for the batch job is a simple JSONL file with one line
-        batch_input = {"gcs_image_uri": image_gcs_uri, "instance_id": cluster_id}
+        # --- MODIFICATION START ---
+        batch_input = {
+            "gcs_image_uri": image_gcs_uri, 
+            "instance_id": cluster_id,
+            "image_bbox": cluster_bbox
+        }
+        # --- MODIFICATION END ---
         
         # Create a unique GCS path for this job's input file
         input_filename = f"incident_inputs/{cluster_id}.jsonl"

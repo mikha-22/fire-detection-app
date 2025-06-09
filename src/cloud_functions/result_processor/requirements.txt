@@ -1,0 +1,7 @@
+      
+# Requirements for the Result Processor function
+google-cloud-storage
+Pillow
+pandas
+
+    
