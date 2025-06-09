@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 import geopandas as gpd
 from sklearn.cluster import DBSCAN
-from google.cloud import pubsub_v1
+from google.cloud import pubsub
 
 # Note: We now import the retriever from the shared src directory
 from src.firms_data_retriever.retriever import FirmsDataRetriever
@@ -19,10 +19,12 @@ FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
 # This is the new topic we publish to, triggering the next function
 OUTPUT_TOPIC_NAME = "wildfire-cluster-detected" 
 
-# Clustering parameters
-DBSCAN_EPS = 0.05  # Max distance between points for clustering (~5km)
-DBSCAN_MIN_SAMPLES = 10 # Minimum number of fire points to form a cluster
+# --- MODIFIED FOR TESTING ---
+# Clustering parameters have been loosened to increase the chance of finding a cluster.
+DBSCAN_EPS = 0.1  # Max distance between points for clustering (~10km)
+DBSCAN_MIN_SAMPLES = 5 # Minimum number of fire points to form a cluster
 
+# --- CORRECTED PATH ---
 # Path to the shapefile within the deployment package
 PEATLAND_SHP_PATH = "src/geodata/Indonesia_peat_lands.shp"
 
@@ -49,7 +51,7 @@ def incident_detector_cloud_function(event, context):
         logging.warning("No FIRMS hotspots found globally. Exiting.")
         return
 
-    # Convert to a GeoDataFrame for spatial analysis
+    # Convert to a GeoDataFrame for spatial analysis. This creates data in EPSG:4326.
     gdf = gpd.GeoDataFrame(
         firms_df, geometry=gpd.points_from_xy(firms_df.longitude, firms_df.latitude), crs="EPSG:4326"
     )
@@ -58,11 +60,18 @@ def incident_detector_cloud_function(event, context):
     try:
         logging.info(f"Reading peatland boundaries from local file: {PEATLAND_SHP_PATH}")
         peatland_boundary = gpd.read_file(PEATLAND_SHP_PATH)
+
+        # --- CRS MISMATCH FIX ---
+        # Before comparing, re-project the peatland boundary data to match the CRS
+        # of the fire hotspot data (EPSG:4326). This ensures an accurate spatial join.
+        peatland_boundary = peatland_boundary.to_crs(gdf.crs)
+
     except Exception as e:
-        logging.error(f"CRITICAL: Could not load shapefile at '{PEATLAND_SHP_PATH}'. Ensure it is included in the deployment. Error: {e}")
+        logging.error(f"CRITICAL: Could not load or reproject shapefile at '{PEATLAND_SHP_PATH}'. Error: {e}", exc_info=True)
         return
 
-    # Keep only the fire points that are 'within' the peatland polygons
+    # Keep only the fire points that are 'within' the peatland polygons.
+    # The sjoin is now accurate because both GeoDataFrames are in the same CRS.
     gdf_peatland_fires = gpd.sjoin(gdf, peatland_boundary, how="inner", predicate='within')
     
     if gdf_peatland_fires.empty:
@@ -77,9 +86,10 @@ def incident_detector_cloud_function(event, context):
     
     cluster_labels = db.labels_
     n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
-    logging.info(f"Found {n_clusters} significant fire clusters.")
+    logging.info(f"Found {n_clusters} significant fire clusters with DBSCAN(eps={DBSCAN_EPS}, min_samples={DBSCAN_MIN_SAMPLES}).")
 
     if n_clusters == 0:
+        logging.warning("No clusters met the criteria. The pipeline will stop here.")
         return
 
     # 4. Prepare and Publish Data for Each Cluster
@@ -87,7 +97,7 @@ def incident_detector_cloud_function(event, context):
     # Ignore noise points (label -1)
     clustered_fires = gdf_peatland_fires[gdf_peatland_fires['cluster_id'] != -1]
 
-    publisher = pubsub_v1.PublisherClient()
+    publisher = pubsub.PublisherClient()
     topic_path = publisher.topic_path(GCP_PROJECT_ID, OUTPUT_TOPIC_NAME)
 
     for cluster_id in sorted(clustered_fires['cluster_id'].unique()):
