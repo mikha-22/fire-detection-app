@@ -2,7 +2,7 @@
 requests
 pandas
 google-cloud-storage
-google-cloud-pubsub-v1
+google-cloud-pubsub
 
 # Geospatial and Machine Learning libraries
 geopandas
