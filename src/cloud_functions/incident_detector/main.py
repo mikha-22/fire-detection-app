@@ -24,7 +24,7 @@ DBSCAN_EPS = 0.05  # Max distance between points for clustering (~5km)
 DBSCAN_MIN_SAMPLES = 10 # Minimum number of fire points to form a cluster
 
 # Path to the shapefile within the deployment package
-PEATLAND_SHP_PATH = "src/geodata/indonesia_peatland/peatlands.shp"
+PEATLAND_SHP_PATH = "src/geodata/Indonesia_peat_lands.shp"
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
