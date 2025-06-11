@@ -22,7 +22,7 @@ steps:
   - '--entry-point=image_processor_cloud_function'
   - '--trigger-topic=wildfire-cluster-detected'
   - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
-  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,GCS_BUCKET_NAME=fire-app-bucket,VERTEX_AI_MODEL_NAME=wildfire-cpr-predictor-model'
+  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,GCS_BUCKET_NAME=fire-app-bucket,VERTEX_AI_OBJECT_DETECTION_MODEL=wildfire-cpr-predictor-model'
   - '--timeout=540s'
   - '--memory=2GiB'
   - '--project=haryo-kebakaran'

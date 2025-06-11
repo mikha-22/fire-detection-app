@@ -9,6 +9,7 @@ import pandas as pd
 import geopandas as gpd
 from sklearn.cluster import DBSCAN
 from google.cloud import pubsub
+import numpy as np # <-- ADDED THIS IMPORT
 
 # Note: We now import the retriever from the shared src directory
 from src.firms_data_retriever.retriever import FirmsDataRetriever
@@ -17,12 +18,20 @@ from src.firms_data_retriever.retriever import FirmsDataRetriever
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
 # This is the new topic we publish to, triggering the next function
-OUTPUT_TOPIC_NAME = "wildfire-cluster-detected" 
+OUTPUT_TOPIC_NAME = "wildfire-cluster-detected"
 
-# --- MODIFIED FOR TESTING ---
-# Clustering parameters have been loosened to increase the chance of finding a cluster.
-DBSCAN_EPS = 0.1  # Max distance between points for clustering (~10km)
-DBSCAN_MIN_SAMPLES = 5 # Minimum number of fire points to form a cluster
+# --- MODIFIED TO ACCOUNT FOR EARTH'S CURVATURE (Haversine Distance) ---
+# Define the desired cluster radius in kilometers
+DESIRED_EPS_KM = 10 # Example: 10 kilometers. Adjust as needed for your definition of a "cluster"
+EARTH_RADIUS_KM = 6371 # Mean Earth radius in kilometers (approximate)
+
+# Convert the desired EPS from kilometers to radians for the Haversine metric
+DBSCAN_EPS_RADIANS = DESIRED_EPS_KM / EARTH_RADIUS_KM
+
+# Minimum number of fire points to form a cluster
+# Keeping this low (e.g., 2) for testing purposes to ensure clusters are found.
+DBSCAN_MIN_SAMPLES = 2 # TEMPORARY: Reduced for testing to force cluster detection
+# --- END MODIFIED FOR TESTING ---
 
 # --- CORRECTED PATH ---
 # Path to the shapefile within the deployment package
@@ -73,7 +82,7 @@ def incident_detector_cloud_function(event, context):
     # Keep only the fire points that are 'within' the peatland polygons.
     # The sjoin is now accurate because both GeoDataFrames are in the same CRS.
     gdf_peatland_fires = gpd.sjoin(gdf, peatland_boundary, how="inner", predicate='within')
-    
+
     if gdf_peatland_fires.empty:
         logging.info("No FIRMS hotspots found on Indonesian peatlands after filtering. Exiting.")
         return
@@ -81,12 +90,18 @@ def incident_detector_cloud_function(event, context):
     logging.info(f"Found {len(gdf_peatland_fires)} total fire points on Indonesian peatlands.")
 
     # 3. Analyse for Clusters
-    coords = gdf_peatland_fires[['longitude', 'latitude']].values
-    db = DBSCAN(eps=DBSCAN_EPS, min_samples=DBSCAN_MIN_SAMPLES, algorithm='ball_tree').fit(coords)
-    
+    # Convert latitude and longitude to radians for Haversine distance metric
+    # DBSCAN's haversine metric expects (latitude, longitude) in radians, NOT (longitude, latitude)
+    coords_radians = np.radians(gdf_peatland_fires[['latitude', 'longitude']].values)
+
+    # Use Haversine distance metric
+    db = DBSCAN(eps=DBSCAN_EPS_RADIANS, min_samples=DBSCAN_MIN_SAMPLES,
+                algorithm='ball_tree', metric='haversine').fit(coords_radians)
+
     cluster_labels = db.labels_
     n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
-    logging.info(f"Found {n_clusters} significant fire clusters with DBSCAN(eps={DBSCAN_EPS}, min_samples={DBSCAN_MIN_SAMPLES}).")
+    # Log the EPS in kilometers for clarity
+    logging.info(f"Found {n_clusters} significant fire clusters with DBSCAN(eps={DESIRED_EPS_KM}km, min_samples={DBSCAN_MIN_SAMPLES}).")
 
     if n_clusters == 0:
         logging.warning("No clusters met the criteria. The pipeline will stop here.")
@@ -102,9 +117,9 @@ def incident_detector_cloud_function(event, context):
 
     for cluster_id in sorted(clustered_fires['cluster_id'].unique()):
         cluster_gdf = clustered_fires[clustered_fires['cluster_id'] == cluster_id]
-        
+
         centroid = cluster_gdf.geometry.unary_union.centroid
-        
+
         cluster_data = {
             "cluster_id": f"fire_cluster_{datetime.utcnow().strftime('%Y%m%d')}_{cluster_id}",
             "point_count": len(cluster_gdf),
@@ -112,10 +127,10 @@ def incident_detector_cloud_function(event, context):
             "centroid_longitude": centroid.x,
             "hotspots": json.loads(cluster_gdf.to_json())['features']
         }
-        
+
         message_json = json.dumps(cluster_data, default=str)
         message_bytes = message_json.encode('utf-8')
-        
+
         try:
             # Publish one message per cluster
             publish_future = publisher.publish(topic_path, data=message_bytes)
