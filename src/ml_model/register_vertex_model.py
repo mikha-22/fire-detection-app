@@ -25,10 +25,24 @@ MODEL_DISPLAY_NAME = "wildfire-cpr-predictor-model"
 
 # --- Main Script Logic ---
 def main():
+    print(f"--- Starting model registration process ---")
+
+    # --- FIX: Ensure model.pth exists BEFORE building the local_model ---
+    model_path = "src/ml_model/model.pth"
+    if not os.path.exists(model_path):
+         print(f"{model_path} not found. Running fire_detection_model.py to generate it...")
+         # Ensure the command context is correct, pointing to the right script path
+         os.system("python src/ml_model/fire_detection_model.py")
+         if not os.path.exists(model_path):
+             print(f"CRITICAL: Failed to generate {model_path}. Exiting.")
+             return # Exit if model still doesn't exist
+         print(f"Successfully generated {model_path}.")
+    # --------------------------------------------------------------------
+
     print(f"--- Building Custom Prediction Routine container ---")
     print(f"Image URI: {IMAGE_URI}")
     
-    # 1. Build the custom container using CPR
+    # 1. Build the custom container using CPR. Now it will include model.pth.
     local_model = LocalModel.build_cpr_model(
         "src/ml_model/", 
         IMAGE_URI,
@@ -46,10 +60,6 @@ def main():
 
     # 3. Upload the model to Vertex AI Model Registry
     print("\n--- Uploading model to Vertex AI Model Registry ---")
-    if not os.path.exists("src/ml_model/model.pth"):
-         print("model.pth not found. Running fire_detection_model.py to generate it...")
-         os.system("python src/ml_model/fire_detection_model.py")
-         
     aiplatform.init(project=PROJECT_ID, location=REGION)
     model = aiplatform.Model.upload(
         local_model=local_model,
