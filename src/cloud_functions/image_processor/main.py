@@ -8,8 +8,6 @@ from datetime import datetime
 
 from google.cloud import aiplatform
 from google.cloud import storage
-
-# We still use the acquirer, but in a more targeted way
 from src.satellite_imagery_acquirer.acquirer import SatelliteImageryAcquirer
 
 # --- Configuration ---
@@ -17,104 +15,111 @@ GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 GCP_REGION = os.environ.get("GCP_REGION")
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME")
 VERTEX_AI_MODEL_NAME = os.environ.get("VERTEX_AI_OBJECT_DETECTION_MODEL")
-
 BATCH_PREDICTION_MACHINE_TYPE = "n1-standard-4"
-# Optional: If your model benefits from GPUs, uncomment and configure:
-# BATCH_PREDICTION_ACCELERATOR_TYPE = "NVIDIA_TESLA_T4"
-# BATCH_PREDICTION_ACCELERATOR_COUNT = 1
-
-# --- NEW: Service Account for Vertex AI Batch Prediction Job ---
-# This should be the service account that has permissions to read/write GCS and run AI Platform jobs
 VERTEX_AI_BATCH_SERVICE_ACCOUNT = "fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com"
 
-# --- Logging ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def image_processor_cloud_function(event, context):
     """
-    This function is triggered by a single fire cluster detection. It:
-    1. Fetches a satellite image for the cluster's location.
-    2. Submits a Vertex AI Batch Prediction job for that single image.
+    This function is triggered by a BATCH of fire clusters. It:
+    1. Fetches satellite images for ALL clusters' locations.
+    2. Creates a single JSONL file for all images.
+    3. Submits ONE Vertex AI Batch Prediction job for all images.
     """
-    logging.info("Image Processor function triggered.")
+    logging.info("Image Processor function triggered for a batch of incidents.")
 
-    # 1. Parse the incoming message from the IncidentDetector
     if 'data' not in event:
         logging.error("No data found in the trigger event.")
         return
 
     message_data = base64.b64decode(event['data']).decode('utf-8')
-    cluster_data = json.loads(message_data)
+    batch_data = json.loads(message_data)
+    incidents = batch_data.get("incidents", [])
 
-    cluster_id = cluster_data.get("cluster_id")
-    lat = cluster_data.get("centroid_latitude")
-    lon = cluster_data.get("centroid_longitude")
-
-    if not all([cluster_id, lat, lon]):
-        logging.error(f"Missing critical data in message: {cluster_data}")
+    if not incidents:
+        logging.warning("Received a batch message with no incidents. Exiting.")
         return
 
-    logging.info(f"Processing cluster {cluster_id} at ({lat}, {lon}).")
+    logging.info(f"Processing a batch of {len(incidents)} incidents from date {batch_data.get('incident_date')}.")
 
-    # 2. Fetch a targeted satellite image
-    bbox_size = 0.1
-    cluster_bbox = [lon - bbox_size/2, lat - bbox_size/2, lon + bbox_size/2, lat + bbox_size/2]
+    # --- MODIFIED LOGIC: Process all incidents in the batch ---
+    regions_to_acquire = []
+    for incident in incidents:
+        cluster_id = incident.get("cluster_id")
+        lat = incident.get("centroid_latitude")
+        lon = incident.get("centroid_longitude")
 
-    region_for_acquirer = {
-        "id": cluster_id,
-        "name": f"Incident area for {cluster_id}",
-        "bbox": cluster_bbox,
-        "description": "Dynamically generated region for a specific fire cluster."
-    }
+        if not all([cluster_id, lat, lon]):
+            logging.warning(f"Skipping incident with missing data: {incident}")
+            continue
+
+        bbox_size = 0.1
+        cluster_bbox = [lon - bbox_size/2, lat - bbox_size/2, lon + bbox_size/2, lat + bbox_size/2]
+
+        regions_to_acquire.append({
+            "id": cluster_id,
+            "name": f"Incident area for {cluster_id}",
+            "bbox": cluster_bbox
+        })
 
     try:
+        # 1. Acquire all images in one go
         imagery_acquirer = SatelliteImageryAcquirer(gcs_bucket_name=GCS_BUCKET_NAME)
-        gcs_image_uris = imagery_acquirer.acquire_and_export_imagery([region_for_acquirer])
+        gcs_image_uris = imagery_acquirer.acquire_and_export_imagery(regions_to_acquire)
 
-        if not gcs_image_uris or cluster_id not in gcs_image_uris:
-            logging.error(f"Failed to acquire satellite image for cluster {cluster_id}.")
+        if not gcs_image_uris:
+            logging.error("Failed to acquire any satellite images for the batch.")
+            return
+        
+        logging.info(f"Successfully acquired {len(gcs_image_uris)} of {len(regions_to_acquire)} requested images.")
+
+        # 2. Create a single JSONL file for the batch prediction job
+        batch_input_lines = []
+        for region in regions_to_acquire:
+            cluster_id = region["id"]
+            if cluster_id in gcs_image_uris:
+                batch_input = {
+                    "instance_id": cluster_id,
+                    "gcs_image_uri": gcs_image_uris[cluster_id],
+                    "image_bbox": region["bbox"] 
+                }
+                batch_input_lines.append(json.dumps(batch_input))
+        
+        if not batch_input_lines:
+            logging.error("No images were successfully processed to create a batch input file.")
             return
 
-        image_gcs_uri = gcs_image_uris[cluster_id]
-        logging.info(f"Successfully initiated image export for cluster {cluster_id} to {image_gcs_uri}")
-
-        # 3. Trigger the Vertex AI Object Detection Model
-        aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
-
-        model_list = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')
-        if not model_list:
-            logging.error(f"Could not find Vertex AI Model with display name: {VERTEX_AI_MODEL_NAME}")
-            return
-        model = model_list[0]
-
-        batch_input = {
-            "gcs_image_uri": image_gcs_uri,
-            "instance_id": cluster_id,
-            "image_bbox": cluster_bbox
-        }
-
-        input_filename = f"incident_inputs/{cluster_id}.jsonl"
+        jsonl_content = "\n".join(batch_input_lines)
+        batch_id = f"batch_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+        input_filename = f"incident_inputs/{batch_id}.jsonl"
+        
         storage_client = storage.Client()
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(input_filename)
-        blob.upload_from_string(json.dumps(batch_input))
+        blob.upload_from_string(jsonl_content)
+        logging.info(f"Uploaded batch input file to gs://{GCS_BUCKET_NAME}/{input_filename}")
 
-        # Define and start the batch prediction job
+        # 3. Trigger a single Vertex AI Batch Prediction Job
+        aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
+        model_list = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')
+        if not model_list:
+            logging.error(f"Could not find Vertex AI Model: {VERTEX_AI_MODEL_NAME}")
+            return
+        model = model_list[0]
+
         job = model.batch_predict(
-            job_display_name=f"object_detection_{cluster_id.replace('-', '_')}",
+            job_display_name=f"batch_prediction_{batch_id}",
             gcs_source=f"gs://{GCS_BUCKET_NAME}/{input_filename}",
-            gcs_destination_prefix=f"gs://{GCS_BUCKET_NAME}/incident_outputs/{cluster_id}/",
-            sync=False, # Run asynchronously
+            gcs_destination_prefix=f"gs://{GCS_BUCKET_NAME}/incident_outputs/{batch_id}/",
+            sync=False,
             machine_type=BATCH_PREDICTION_MACHINE_TYPE,
-            service_account=VERTEX_AI_BATCH_SERVICE_ACCOUNT, # <-- ADDED THIS LINE
-            # If using GPUs, uncomment these lines:
-            # accelerator_type=BATCH_PREDICTION_ACCELERATOR_TYPE,
-            # accelerator_count=BATCH_PREDICTION_ACCELERATOR_COUNT
+            service_account=VERTEX_AI_BATCH_SERVICE_ACCOUNT,
         )
-        logging.info(f"Started Vertex AI Batch Prediction job for {cluster_id}. Job name: {job.resource_name}")
+        logging.info(f"Started single Vertex AI Batch Prediction job for batch {batch_id}. Job name: {job.resource_name}")
 
     except Exception as e:
-        logging.error(f"An error occurred during image processing for cluster {cluster_id}. Error: {e}", exc_info=True)
+        logging.error(f"An error occurred during batch image processing. Error: {e}", exc_info=True)
         raise
 
-    logging.info(f"Image Processor function finished for cluster {cluster_id}.")
+    logging.info("Image Processor function finished for the batch.")

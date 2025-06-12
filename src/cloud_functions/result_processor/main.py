@@ -8,116 +8,121 @@ from io import BytesIO
 
 from google.cloud import storage
 from PIL import Image
-
-# Import the visualizer from the shared source
 from src.map_visualizer.visualizer import MapVisualizer
 
 # --- Configuration ---
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "fire-app-bucket")
-# This is the GCS folder where final, user-facing artifacts will be stored.
 FINAL_OUTPUT_GCS_PREFIX = "final_outputs/"
 
-# --- Logging ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 storage_client = storage.Client()
 
 def result_processor_cloud_function(event, context):
     """
-    Triggered by a Pub/Sub message from a Cloud Logging Sink when a Vertex AI
-    Batch Prediction job completes. This function:
-    1. Fetches the AI prediction results.
-    2. Retrieves the original satellite image and its metadata.
-    3. Invokes the MapVisualizer to create a final map.
-    4. Saves the final map and metadata to a public-facing GCS location.
+    Triggered by a Pub/Sub message when a Vertex AI Batch Prediction job completes.
+    This function now processes a results file that may contain MULTIPLE predictions.
+    1. Fetches the AI prediction results file (JSONL format).
+    2. Loops through each prediction in the file.
+    3. For each prediction, retrieves the original image and metadata.
+    4. Invokes the MapVisualizer to create a final map.
+    5. Saves the final map and metadata to GCS.
     """
     logging.info("Result Processor function triggered.")
 
-    # 1. Parse the incoming message from the Cloud Logging sink
     try:
         message_data = base64.b64decode(event['data']).decode('utf-8')
         log_entry = json.loads(message_data)
         
-        # Extract the GCS path for the prediction output. This path is standard
-        # in Vertex AI job completion logs.
-        gcs_output_uri = log_entry['protoPayload']['metadata']['batchPredictionJob']['outputInfo']['gcsOutputDirectory']
-        logging.info(f"Processing prediction results from: {gcs_output_uri}")
+        # --- MODIFIED: The log entry structure for ml_job is different ---
+        # We get the GCS output path directly from the resource labels in the log.
+        gcs_output_uri = log_entry['resource']['labels']['job_id'].split('/')[-1]
+        gcs_output_prefix = f"incident_outputs/{gcs_output_uri}/"
+        logging.info(f"Processing prediction results from prefix: {gcs_output_prefix}")
+
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logging.error(f"Could not parse trigger event payload or find GCS path. Error: {e}", extra={"payload": event.get('data')})
         return
 
-    # 2. Fetch the prediction results file from GCS
-    bucket_name, blob_prefix = gcs_output_uri.replace("gs://", "").split("/", 1)
-    bucket = storage_client.bucket(bucket_name)
+    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+    prediction_blobs = list(bucket.list_blobs(prefix=gcs_output_prefix))
     
-    # The result file is typically named 'predictions_00001.jsonl' or similar.
-    # We find the first blob with 'prediction' in its name.
-    prediction_blob = next(
-        (b for b in bucket.list_blobs(prefix=blob_prefix) if 'prediction' in b.name),
-        None
-    )
-    if not prediction_blob:
-        logging.error(f"No prediction result file found at prefix: {gcs_output_uri}")
+    if not prediction_blobs:
+        logging.error(f"No prediction result file found at prefix: {gcs_output_prefix}")
         return
 
-    prediction_content = json.loads(prediction_blob.download_as_string())
-    # The predictor returns a dictionary like {"predictions": [...]}, so we extract the list.
-    ai_detections = prediction_content.get('predictions')
+    # --- MODIFIED LOGIC: Process each prediction file (usually one) ---
+    for prediction_blob in prediction_blobs:
+        if 'prediction' not in prediction_blob.name:
+            continue
+            
+        logging.info(f"Processing results file: {prediction_blob.name}")
+        prediction_content_str = prediction_blob.download_as_string().decode('utf-8')
+        
+        # A JSONL file has one JSON object per line
+        prediction_lines = prediction_content_str.strip().split('\n')
 
-    if not ai_detections:
-        logging.warning("Prediction result file was empty or malformed.")
-        return
-        
-    # We assume one image per job, so we process the first prediction.
-    prediction = ai_detections[0]
-    cluster_id = prediction.get("instance_id")
-    logging.info(f"Successfully parsed prediction for cluster: {cluster_id}")
+        # --- MODIFIED LOGIC: Loop through each prediction (each line) ---
+        for line in prediction_lines:
+            try:
+                # The custom predictor wraps its output, so we unwrap it here.
+                prediction_data = json.loads(line)
+                ai_detections = prediction_data.get('predictions')
+                if not ai_detections:
+                    logging.warning(f"Skipping malformed prediction line: {line}")
+                    continue
 
-    # 3. Retrieve the original image and its metadata
-    # The 'ImageProcessorCF' saved the input data in a predictable location.
-    input_data_blob_path = f"incident_inputs/{cluster_id}.jsonl"
-    input_blob = bucket.blob(input_data_blob_path)
-    
-    try:
-        input_data_str = input_blob.download_as_string()
-        input_data = json.loads(input_data_str)
-        
-        # Get the image GCS path and its bounding box
-        original_image_uri = input_data['gcs_image_uri']
-        image_bbox = input_data['image_bbox'] # This is why the previous step was critical
-        
-        # Download the actual image bytes
-        img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
-        image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
-        
-    except Exception as e:
-        logging.error(f"Failed to retrieve original image or metadata for {cluster_id}. Error: {e}", exc_info=True)
-        return
+                prediction = ai_detections[0] # There's one prediction per instance
+                cluster_id = prediction.get("instance_id")
+                logging.info(f"Processing parsed prediction for cluster: {cluster_id}")
+                
+                # --- The rest of the logic is per-cluster and remains the same ---
+                input_data_blob_path = f"incident_inputs/{cluster_id}.jsonl" # This needs to be adjusted
+                
+                # Find the master batch file that contains this cluster_id
+                batch_job_id = gcs_output_prefix.split('/')[1]
+                master_input_blob_path = f"incident_inputs/{batch_job_id}.jsonl"
+                master_input_blob = bucket.blob(master_input_blob_path)
+                
+                input_data = None
+                if master_input_blob.exists():
+                    all_inputs_str = master_input_blob.download_as_string().decode('utf-8')
+                    for input_line in all_inputs_str.strip().split('\n'):
+                        line_data = json.loads(input_line)
+                        if line_data.get("instance_id") == cluster_id:
+                            input_data = line_data
+                            break
 
-    # 4. Generate and save the final map
-    try:
-        visualizer = MapVisualizer()
-        acquisition_date = cluster_id.split('_')[2] # Infer date from the ID, e.g., "fire_cluster_20240115_0"
-        
-        final_map_image = visualizer.generate_fire_map(
-            base_image_bytes=image_bytes,
-            image_bbox=image_bbox,
-            ai_detections=ai_detections,
-            firms_hotspots_df=None, # FIRMS data is not passed through; omitting for simplicity
-            acquisition_date_str=acquisition_date
-        )
-        
-        # Save map image to the final output location in GCS
-        map_output_path = f"{FINAL_OUTPUT_GCS_PREFIX}{cluster_id}_map.png"
-        map_blob = bucket.blob(map_output_path)
-        
-        # Convert PIL Image to bytes to upload
-        img_byte_arr = BytesIO()
-        final_map_image.save(img_byte_arr, format='PNG')
-        map_blob.upload_from_string(img_byte_arr.getvalue(), content_type='image/png')
-        
-        logging.info(f"Successfully saved final map to gs://{GCS_BUCKET_NAME}/{map_output_path}")
+                if not input_data:
+                    logging.error(f"Could not find input metadata for {cluster_id} in {master_input_blob_path}")
+                    continue
 
-    except Exception as e:
-        logging.error(f"Failed to generate or save map for {cluster_id}. Error: {e}", exc_info=True)
-    
+                original_image_uri = input_data['gcs_image_uri']
+                image_bbox = input_data['image_bbox']
+                
+                img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
+                image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
+                
+                visualizer = MapVisualizer()
+                acquisition_date = cluster_id.split('_')[2]
+                
+                final_map_image = visualizer.generate_fire_map(
+                    base_image_bytes=image_bytes,
+                    image_bbox=image_bbox,
+                    ai_detections=ai_detections,
+                    firms_hotspots_df=None,
+                    acquisition_date_str=acquisition_date
+                )
+                
+                map_output_path = f"{FINAL_OUTPUT_GCS_PREFIX}{cluster_id}_map.png"
+                map_blob = bucket.blob(map_output_path)
+                
+                img_byte_arr = BytesIO()
+                final_map_image.save(img_byte_arr, format='PNG')
+                map_blob.upload_from_string(img_byte_arr.getvalue(), content_type='image/png')
+                
+                logging.info(f"Successfully generated and saved map for {cluster_id} to gs://{GCS_BUCKET_NAME}/{map_output_path}")
+
+            except Exception as e:
+                logging.error(f"Failed to process a prediction line: '{line}'. Error: {e}", exc_info=True)
+
     logging.info("Result Processor function finished successfully.")
