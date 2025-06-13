@@ -47,8 +47,7 @@ def result_processor_cloud_function(event, context):
         message_data = base64.b64decode(event['data']).decode('utf-8')
         log_entry = json.loads(message_data)
 
-        # --- ROBUST FIX: Get job_id from the log and fetch job details via API ---
-        # The job_id is reliably located in the resource.labels for batch prediction job logs.
+        # Get job_id from the log and fetch job details via API
         job_id = log_entry['resource']['labels']['job_id']
         logging.info(f"Extracted Vertex AI Batch Prediction job ID: {job_id}")
 
@@ -67,7 +66,6 @@ def result_processor_cloud_function(event, context):
 
         gcs_output_prefix = f"incident_outputs/{run_date}/"
         logging.info(f"Processing prediction results for run_date '{run_date}' from GCS prefix: {gcs_output_prefix}")
-        # --- END OF FIX ---
 
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logging.error(f"Could not parse trigger event or determine run details. Error: {e}", extra={"payload": event.get('data')})
@@ -103,6 +101,11 @@ def result_processor_cloud_function(event, context):
         # Each line in the file is a separate JSON object for a prediction
         for line in prediction_content_str.strip().split('\n'):
             try:
+                # --- FINAL FIX: Ensure the line is not empty before parsing ---
+                if not line.strip():
+                    continue # Skip blank or whitespace-only lines
+                # --- END OF FIX ---
+
                 prediction_data = json.loads(line)
                 # The actual prediction is nested under the 'predictions' key
                 ai_detections = prediction_data.get('predictions')
