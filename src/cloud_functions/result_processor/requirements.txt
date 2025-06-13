@@ -2,3 +2,5 @@
 google-cloud-storage
 Pillow
 pandas  
+google-cloud-aiplatform
+

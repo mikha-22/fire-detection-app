@@ -22,7 +22,8 @@ steps:
   - '--entry-point=result_processor_cloud_function'
   - '--trigger-topic=wildfire-prediction-completed'
   - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
-  - '--set-env-vars=GCS_BUCKET_NAME=fire-app-bucket'
+  # --- MODIFICATION: Added GCP_PROJECT_ID and GCP_REGION ---
+  - '--set-env-vars=GCS_BUCKET_NAME=fire-app-bucket,GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2'
   - '--timeout=540s'
   - '--memory=2GiB'
   - '--project=haryo-kebakaran'
