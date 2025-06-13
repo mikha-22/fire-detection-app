@@ -43,7 +43,6 @@ def image_processor_cloud_function(event, context):
 
     logging.info(f"Processing a batch of {len(incidents)} incidents from date {batch_data.get('incident_date')}.")
 
-    # --- MODIFIED LOGIC: Process all incidents in the batch ---
     regions_to_acquire = []
     for incident in incidents:
         cluster_id = incident.get("cluster_id")
@@ -64,7 +63,6 @@ def image_processor_cloud_function(event, context):
         })
 
     try:
-        # 1. Acquire all images in one go
         imagery_acquirer = SatelliteImageryAcquirer(gcs_bucket_name=GCS_BUCKET_NAME)
         gcs_image_uris = imagery_acquirer.acquire_and_export_imagery(regions_to_acquire)
 
@@ -74,7 +72,6 @@ def image_processor_cloud_function(event, context):
         
         logging.info(f"Successfully acquired {len(gcs_image_uris)} of {len(regions_to_acquire)} requested images.")
 
-        # 2. Create a single JSONL file for the batch prediction job
         batch_input_lines = []
         for region in regions_to_acquire:
             cluster_id = region["id"]
@@ -100,7 +97,6 @@ def image_processor_cloud_function(event, context):
         blob.upload_from_string(jsonl_content)
         logging.info(f"Uploaded batch input file to gs://{GCS_BUCKET_NAME}/{input_filename}")
 
-        # 3. Trigger a single Vertex AI Batch Prediction Job
         aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
         model_list = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')
         if not model_list:
@@ -108,18 +104,22 @@ def image_processor_cloud_function(event, context):
             return
         model = model_list[0]
 
+        job_display_name = f"batch_prediction_{batch_id}"
         job = model.batch_predict(
-            job_display_name=f"batch_prediction_{batch_id}",
+            job_display_name=job_display_name,
             gcs_source=f"gs://{GCS_BUCKET_NAME}/{input_filename}",
             gcs_destination_prefix=f"gs://{GCS_BUCKET_NAME}/incident_outputs/{batch_id}/",
             sync=False,
             machine_type=BATCH_PREDICTION_MACHINE_TYPE,
             service_account=VERTEX_AI_BATCH_SERVICE_ACCOUNT,
         )
-        logging.info(f"Started single Vertex AI Batch Prediction job for batch {batch_id}. Job name: {job.resource_name}")
+        
+        # --- FIX: Log the display_name, which is available immediately ---
+        logging.info(f"Successfully submitted Vertex AI Batch Prediction job. Display name: {job.display_name}")
 
     except Exception as e:
         logging.error(f"An error occurred during batch image processing. Error: {e}", exc_info=True)
+        # Re-raising the exception will cause the Cloud Function to report a failure.
         raise
 
     logging.info("Image Processor function finished for the batch.")
