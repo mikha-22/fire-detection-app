@@ -40,7 +40,6 @@ def image_processor_cloud_function(event, context):
 
     regions_to_acquire = []
     for incident in incidents:
-        # ... (same logic to build the regions_to_acquire list) ...
         cluster_id = incident.get("cluster_id")
         lat = incident.get("centroid_latitude")
         lon = incident.get("centroid_longitude")
@@ -76,9 +75,8 @@ def image_processor_cloud_function(event, context):
 
         jsonl_content = "\n".join(batch_input_lines)
         
-        # --- MODIFIED: Use the run_date for predictable naming ---
+        # --- FINAL FIX: Use the run_date for all naming ---
         input_filename = f"incident_inputs/{run_date}.jsonl"
-        output_folder_name = run_date
         
         storage_client = storage.Client()
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
@@ -89,11 +87,11 @@ def image_processor_cloud_function(event, context):
         aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
         model = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')[0]
 
-        job_display_name = f"batch_prediction_{output_folder_name}"
+        job_display_name = f"batch_prediction_{run_date}"
         job = model.batch_predict(
             job_display_name=job_display_name,
             gcs_source=f"gs://{GCS_BUCKET_NAME}/{input_filename}",
-            gcs_destination_prefix=f"gs://{GCS_BUCKET_NAME}/incident_outputs/{output_folder_name}/",
+            gcs_destination_prefix=f"gs://{GCS_BUCKET_NAME}/incident_outputs/{run_date}/", # Use run_date here
             sync=False,
             machine_type=BATCH_PREDICTION_MACHINE_TYPE,
             service_account=VERTEX_AI_BATCH_SERVICE_ACCOUNT,

@@ -24,7 +24,6 @@ def result_processor_cloud_function(event, context):
         message_data = base64.b64decode(event['data']).decode('utf-8')
         log_entry = json.loads(message_data)
         
-        # --- MODIFIED: Extract the output path directly. It contains the run_date. ---
         gcs_output_uri = log_entry['protoPayload']['metadata']['batchPredictionJob']['outputInfo']['gcsOutputDirectory']
         logging.info(f"Processing prediction results from: {gcs_output_uri}")
 
@@ -40,11 +39,16 @@ def result_processor_cloud_function(event, context):
         logging.error(f"No prediction result files found at prefix: {gcs_output_prefix}")
         return
 
-    # --- MODIFIED: Reconstruct paths based on the run_date from the output folder ---
+    # --- FINAL FIX: The run_date is the last part of the folder path ---
     run_date = gcs_output_prefix.strip('/').split('/')[-1]
     master_input_blob_path = f"incident_inputs/{run_date}.jsonl"
-    all_inputs_str = bucket.blob(master_input_blob_path).download_as_string().decode('utf-8')
-    input_metadata = {json.loads(line)['instance_id']: json.loads(line) for line in all_inputs_str.strip().split('\n')}
+    
+    try:
+        all_inputs_str = bucket.blob(master_input_blob_path).download_as_string().decode('utf-8')
+        input_metadata = {json.loads(line)['instance_id']: json.loads(line) for line in all_inputs_str.strip().split('\n')}
+    except Exception as e:
+        logging.error(f"Could not read or parse the master input file: {master_input_blob_path}. Error: {e}")
+        return
 
     for prediction_blob in prediction_blobs:
         if 'prediction' not in prediction_blob.name:
@@ -64,7 +68,7 @@ def result_processor_cloud_function(event, context):
                 
                 input_data = input_metadata.get(cluster_id)
                 if not input_data:
-                    logging.error(f"Could not find input metadata for {cluster_id} in {master_input_blob_path}")
+                    logging.error(f"Could not find input metadata for {cluster_id}")
                     continue
 
                 original_image_uri = input_data['gcs_image_uri']
@@ -80,7 +84,6 @@ def result_processor_cloud_function(event, context):
                     base_image_bytes=image_bytes, image_bbox=image_bbox, ai_detections=ai_detections, acquisition_date_str=acquisition_date
                 )
                 
-                # --- MODIFIED: Save maps into a date-stamped folder ---
                 map_output_path = f"{FINAL_OUTPUT_GCS_PREFIX}{run_date}/{cluster_id}_map.png"
                 map_blob = bucket.blob(map_output_path)
                 
@@ -91,6 +94,6 @@ def result_processor_cloud_function(event, context):
                 logging.info(f"Successfully generated map for {cluster_id} in run {run_date}.")
 
             except Exception as e:
-                logging.error(f"Failed to process prediction line: '{line}'. Error: {e}", exc_info=True)
+                logging.error(f"Failed to process a prediction line: '{line}'. Error: {e}", exc_info=True)
 
     logging.info("Result Processor function finished successfully.")
