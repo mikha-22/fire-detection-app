@@ -26,13 +26,6 @@ PEATLAND_SHP_PATH = "src/geodata/Indonesia_peat_lands.shp"
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def incident_detector_cloud_function(event, context):
-    """
-    This Cloud Function:
-    1. Fetches global FIRMS fire data.
-    2. Filters it to Indonesian peatlands.
-    3. Finds all significant clusters of fire activity.
-    4. Publishes a SINGLE message containing all clusters to trigger the next stage.
-    """
     logging.info("Incident Detector function triggered.")
 
     firms_retriever = FirmsDataRetriever(api_key=FIRMS_API_KEY, base_url="https://firms.modaps.eosdis.nasa.gov/api/area/csv/", sensors=["VIIRS_SNPP_NRT"])
@@ -49,13 +42,13 @@ def incident_detector_cloud_function(event, context):
     try:
         peatland_boundary = gpd.read_file(PEATLAND_SHP_PATH).to_crs(gdf.crs)
     except Exception as e:
-        logging.error(f"CRITICAL: Could not load or reproject shapefile at '{PEATLAND_SHP_PATH}'. Error: {e}", exc_info=True)
+        logging.error(f"CRITICAL: Could not load or reproject shapefile. Error: {e}", exc_info=True)
         return
 
     gdf_peatland_fires = gpd.sjoin(gdf, peatland_boundary, how="inner", predicate='within')
 
     if gdf_peatland_fires.empty:
-        logging.info("No FIRMS hotspots found on Indonesian peatlands after filtering. Exiting.")
+        logging.info("No FIRMS hotspots found on Indonesian peatlands. Exiting.")
         return
 
     logging.info(f"Found {len(gdf_peatland_fires)} total fire points on Indonesian peatlands.")
@@ -72,17 +65,18 @@ def incident_detector_cloud_function(event, context):
         
     logging.info(f"Found {n_clusters} significant fire clusters.")
 
-    # --- MODIFIED LOGIC: Aggregate all clusters into a single payload ---
     gdf_peatland_fires['cluster_id'] = cluster_labels
     clustered_fires = gdf_peatland_fires[gdf_peatland_fires['cluster_id'] != -1]
     
     all_incidents = []
-    for cluster_id in sorted(clustered_fires['cluster_id'].unique()):
-        cluster_gdf = clustered_fires[clustered_fires['cluster_id'] == cluster_id]
+    run_date_str = datetime.utcnow().strftime('%Y-%m-%d') # The single date for this run
+
+    for cluster_id_num in sorted(clustered_fires['cluster_id'].unique()):
+        cluster_gdf = clustered_fires[clustered_fires['cluster_id'] == cluster_id_num]
         centroid = cluster_gdf.geometry.unary_union.centroid
 
         incident_data = {
-            "cluster_id": f"fire_cluster_{datetime.utcnow().strftime('%Y%m%d')}_{cluster_id}",
+            "cluster_id": f"fire_cluster_{run_date_str.replace('-', '')}_{cluster_id_num}",
             "point_count": len(cluster_gdf),
             "centroid_latitude": centroid.y,
             "centroid_longitude": centroid.x,
@@ -90,9 +84,9 @@ def incident_detector_cloud_function(event, context):
         }
         all_incidents.append(incident_data)
 
-    # NEW: Create a master payload containing all incidents
+    # --- MODIFIED: The payload now includes the run_date ---
     master_payload = {
-        "incident_date": datetime.utcnow().strftime('%Y-%m-%d'),
+        "run_date": run_date_str,
         "total_clusters": len(all_incidents),
         "incidents": all_incidents
     }
@@ -104,11 +98,10 @@ def incident_detector_cloud_function(event, context):
     message_bytes = message_json.encode('utf-8')
 
     try:
-        # NEW: Publish only one message for the entire batch
         publish_future = publisher.publish(topic_path, data=message_bytes)
         publish_future.result()
-        logging.info(f"Successfully published a single batch message with {len(all_incidents)} clusters to {OUTPUT_TOPIC_NAME}.")
+        logging.info(f"Successfully published a single batch message for run {run_date_str} with {len(all_incidents)} clusters.")
     except Exception as e:
-        logging.error(f"Failed to publish master message for all clusters. Error: {e}")
+        logging.error(f"Failed to publish master message. Error: {e}")
 
     logging.info("Incident Detector function finished successfully.")

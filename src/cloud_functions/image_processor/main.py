@@ -21,12 +21,6 @@ VERTEX_AI_BATCH_SERVICE_ACCOUNT = "fire-app-vm-service-account@haryo-kebakaran.i
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def image_processor_cloud_function(event, context):
-    """
-    This function is triggered by a BATCH of fire clusters. It:
-    1. Fetches satellite images for ALL clusters' locations.
-    2. Creates a single JSONL file for all images.
-    3. Submits ONE Vertex AI Batch Prediction job for all images.
-    """
     logging.info("Image Processor function triggered for a batch of incidents.")
 
     if 'data' not in event:
@@ -36,35 +30,28 @@ def image_processor_cloud_function(event, context):
     message_data = base64.b64decode(event['data']).decode('utf-8')
     batch_data = json.loads(message_data)
     incidents = batch_data.get("incidents", [])
+    run_date = batch_data.get("run_date") # Get the date from the trigger message
 
-    if not incidents:
-        logging.warning("Received a batch message with no incidents. Exiting.")
+    if not incidents or not run_date:
+        logging.warning("Received a batch message with no incidents or no run_date. Exiting.")
         return
 
-    logging.info(f"Processing a batch of {len(incidents)} incidents from date {batch_data.get('incident_date')}.")
+    logging.info(f"Processing a batch of {len(incidents)} incidents for run date: {run_date}.")
 
     regions_to_acquire = []
     for incident in incidents:
+        # ... (same logic to build the regions_to_acquire list) ...
         cluster_id = incident.get("cluster_id")
         lat = incident.get("centroid_latitude")
         lon = incident.get("centroid_longitude")
-
-        if not all([cluster_id, lat, lon]):
-            logging.warning(f"Skipping incident with missing data: {incident}")
-            continue
-
+        if not all([cluster_id, lat, lon]): continue
         bbox_size = 0.1
         cluster_bbox = [lon - bbox_size/2, lat - bbox_size/2, lon + bbox_size/2, lat + bbox_size/2]
-
-        regions_to_acquire.append({
-            "id": cluster_id,
-            "name": f"Incident area for {cluster_id}",
-            "bbox": cluster_bbox
-        })
+        regions_to_acquire.append({"id": cluster_id, "name": f"Incident area for {cluster_id}", "bbox": cluster_bbox})
 
     try:
         imagery_acquirer = SatelliteImageryAcquirer(gcs_bucket_name=GCS_BUCKET_NAME)
-        gcs_image_uris = imagery_acquirer.acquire_and_export_imagery(regions_to_acquire)
+        gcs_image_uris = imagery_acquirer.acquire_and_export_imagery(regions_to_acquire, acquisition_date=run_date)
 
         if not gcs_image_uris:
             logging.error("Failed to acquire any satellite images for the batch.")
@@ -88,8 +75,10 @@ def image_processor_cloud_function(event, context):
             return
 
         jsonl_content = "\n".join(batch_input_lines)
-        batch_id = f"batch_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-        input_filename = f"incident_inputs/{batch_id}.jsonl"
+        
+        # --- MODIFIED: Use the run_date for predictable naming ---
+        input_filename = f"incident_inputs/{run_date}.jsonl"
+        output_folder_name = run_date
         
         storage_client = storage.Client()
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
@@ -98,23 +87,18 @@ def image_processor_cloud_function(event, context):
         logging.info(f"Uploaded batch input file to gs://{GCS_BUCKET_NAME}/{input_filename}")
 
         aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
-        model_list = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')
-        if not model_list:
-            logging.error(f"Could not find Vertex AI Model: {VERTEX_AI_MODEL_NAME}")
-            return
-        model = model_list[0]
+        model = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')[0]
 
-        job_display_name = f"batch_prediction_{batch_id}"
+        job_display_name = f"batch_prediction_{output_folder_name}"
         job = model.batch_predict(
             job_display_name=job_display_name,
             gcs_source=f"gs://{GCS_BUCKET_NAME}/{input_filename}",
-            gcs_destination_prefix=f"gs://{GCS_BUCKET_NAME}/incident_outputs/{batch_id}/",
+            gcs_destination_prefix=f"gs://{GCS_BUCKET_NAME}/incident_outputs/{output_folder_name}/",
             sync=False,
             machine_type=BATCH_PREDICTION_MACHINE_TYPE,
             service_account=VERTEX_AI_BATCH_SERVICE_ACCOUNT,
         )
         
-        # --- FINAL FIX: Log the local variable, not the job object's property ---
         logging.info(f"Successfully submitted Vertex AI Batch Prediction job. Display name: {job_display_name}")
 
     except Exception as e:
