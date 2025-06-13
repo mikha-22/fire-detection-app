@@ -7,10 +7,13 @@ import logging
 from io import BytesIO
 
 from google.cloud import storage
+from google.cloud import aiplatform 
 from PIL import Image
 from src.map_visualizer.visualizer import MapVisualizer
 
 # --- Configuration ---
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+GCP_REGION = os.environ.get("GCP_REGION", "asia-southeast2") # Add region with a default
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "fire-app-bucket")
 FINAL_OUTPUT_GCS_PREFIX = "final_outputs/"
 
@@ -20,12 +23,7 @@ storage_client = storage.Client()
 def result_processor_cloud_function(event, context):
     """
     Triggered by a Pub/Sub message when a Vertex AI Batch Prediction job completes.
-    This function now processes a results file that may contain MULTIPLE predictions.
-    1. Fetches the AI prediction results file (JSONL format).
-    2. Loops through each prediction in the file.
-    3. For each prediction, retrieves the original image and metadata.
-    4. Invokes the MapVisualizer to create a final map.
-    5. Saves the final map and metadata to GCS.
+    This function now uses the AI Platform API to find the correct output path.
     """
     logging.info("Result Processor function triggered.")
 
@@ -33,56 +31,54 @@ def result_processor_cloud_function(event, context):
         message_data = base64.b64decode(event['data']).decode('utf-8')
         log_entry = json.loads(message_data)
         
-        # --- MODIFIED: The log entry structure for ml_job is different ---
-        # We get the GCS output path directly from the resource labels in the log.
-        gcs_output_uri = log_entry['resource']['labels']['job_id'].split('/')[-1]
-        gcs_output_prefix = f"incident_outputs/{gcs_output_uri}/"
-        logging.info(f"Processing prediction results from prefix: {gcs_output_prefix}")
+        job_id = log_entry['resource']['labels']['job_id']
+        job_resource_name = f"projects/{GCP_PROJECT_ID}/locations/{GCP_REGION}/batchPredictionJobs/{job_id}"
+        
+        # --- NEW: Use the AI Platform client to get job details ---
+        client_options = {"api_endpoint": f"{GCP_REGION}-aiplatform.googleapis.com"}
+        job_client = aiplatform.gapic.JobServiceClient(client_options=client_options)
+        
+        batch_job = job_client.get_batch_prediction_job(name=job_resource_name)
+        gcs_output_uri = batch_job.output_info.gcs_output_directory
+        logging.info(f"Successfully fetched job details. Processing results from: {gcs_output_uri}")
 
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logging.error(f"Could not parse trigger event payload or find GCS path. Error: {e}", extra={"payload": event.get('data')})
+    except Exception as e:
+        logging.error(f"Could not parse trigger or fetch job details. Error: {e}", exc_info=True)
         return
 
-    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+    bucket_name, gcs_output_prefix = gcs_output_uri.replace("gs://", "").split("/", 1)
+    bucket = storage_client.bucket(bucket_name)
     prediction_blobs = list(bucket.list_blobs(prefix=gcs_output_prefix))
     
     if not prediction_blobs:
         logging.error(f"No prediction result file found at prefix: {gcs_output_prefix}")
         return
 
-    # --- MODIFIED LOGIC: Process each prediction file (usually one) ---
     for prediction_blob in prediction_blobs:
         if 'prediction' not in prediction_blob.name:
             continue
             
         logging.info(f"Processing results file: {prediction_blob.name}")
         prediction_content_str = prediction_blob.download_as_string().decode('utf-8')
-        
-        # A JSONL file has one JSON object per line
         prediction_lines = prediction_content_str.strip().split('\n')
 
-        # --- MODIFIED LOGIC: Loop through each prediction (each line) ---
         for line in prediction_lines:
             try:
-                # The custom predictor wraps its output, so we unwrap it here.
                 prediction_data = json.loads(line)
                 ai_detections = prediction_data.get('predictions')
                 if not ai_detections:
                     logging.warning(f"Skipping malformed prediction line: {line}")
                     continue
 
-                prediction = ai_detections[0] # There's one prediction per instance
+                prediction = ai_detections[0]
                 cluster_id = prediction.get("instance_id")
                 logging.info(f"Processing parsed prediction for cluster: {cluster_id}")
                 
-                # --- The rest of the logic is per-cluster and remains the same ---
-                input_data_blob_path = f"incident_inputs/{cluster_id}.jsonl" # This needs to be adjusted
-                
-                # Find the master batch file that contains this cluster_id
-                batch_job_id = gcs_output_prefix.split('/')[1]
-                master_input_blob_path = f"incident_inputs/{batch_job_id}.jsonl"
-                master_input_blob = bucket.blob(master_input_blob_path)
-                
+                # The input data is in the original input file for the batch job
+                batch_job_input_uri = batch_job.input_config.gcs_source.uris[0]
+                input_bucket_name, master_input_blob_path = batch_job_input_uri.replace("gs://", "").split("/", 1)
+                master_input_blob = storage_client.bucket(input_bucket_name).blob(master_input_blob_path)
+
                 input_data = None
                 if master_input_blob.exists():
                     all_inputs_str = master_input_blob.download_as_string().decode('utf-8')
