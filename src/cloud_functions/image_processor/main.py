@@ -114,12 +114,11 @@ def image_processor_cloud_function(event, context):
             service_account=VERTEX_AI_BATCH_SERVICE_ACCOUNT,
         )
         
-        # --- FIX: Log the display_name, which is available immediately ---
-        logging.info(f"Successfully submitted Vertex AI Batch Prediction job. Display name: {job.display_name}")
+        # --- FINAL FIX: Log the local variable, not the job object's property ---
+        logging.info(f"Successfully submitted Vertex AI Batch Prediction job. Display name: {job_display_name}")
 
     except Exception as e:
         logging.error(f"An error occurred during batch image processing. Error: {e}", exc_info=True)
-        # Re-raising the exception will cause the Cloud Function to report a failure.
         raise
 
     logging.info("Image Processor function finished for the batch.")
