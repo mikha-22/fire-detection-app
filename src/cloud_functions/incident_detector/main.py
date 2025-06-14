@@ -8,15 +8,17 @@ from datetime import datetime
 import pandas as pd
 import geopandas as gpd
 from sklearn.cluster import DBSCAN
-from google.cloud import pubsub
+from google.cloud import pubsub, storage
 import numpy as np
 
 from src.firms_data_retriever.retriever import FirmsDataRetriever
 
 # --- Configuration ---
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") # Added GCS Bucket
 FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
-OUTPUT_TOPIC_NAME = "wildfire-cluster-detected" 
+OUTPUT_TOPIC_NAME = "wildfire-cluster-detected"
+INCIDENTS_GCS_PREFIX = "incidents" # New GCS prefix for outputs
 DESIRED_EPS_KM = 10
 EARTH_RADIUS_KM = 6371
 DBSCAN_EPS_RADIANS = DESIRED_EPS_KM / EARTH_RADIUS_KM
@@ -27,6 +29,14 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def incident_detector_cloud_function(event, context):
     logging.info("Incident Detector function triggered.")
+
+    if not GCS_BUCKET_NAME:
+        logging.critical("GCS_BUCKET_NAME environment variable not set. Cannot proceed.")
+        return
+
+    # --- MODIFIED: Establish a single run_date for this execution ---
+    run_date_str = datetime.utcnow().strftime('%Y-%m-%d')
+    logging.info(f"Processing for run_date: {run_date_str}")
 
     firms_retriever = FirmsDataRetriever(api_key=FIRMS_API_KEY, base_url="https://firms.modaps.eosdis.nasa.gov/api/area/csv/", sensors=["VIIRS_SNPP_NRT"])
     firms_df = firms_retriever.get_and_filter_firms_data([])
@@ -69,8 +79,6 @@ def incident_detector_cloud_function(event, context):
     clustered_fires = gdf_peatland_fires[gdf_peatland_fires['cluster_id'] != -1]
     
     all_incidents = []
-    run_date_str = datetime.utcnow().strftime('%Y-%m-%d') # The single date for this run
-
     for cluster_id_num in sorted(clustered_fires['cluster_id'].unique()):
         cluster_gdf = clustered_fires[clustered_fires['cluster_id'] == cluster_id_num]
         centroid = cluster_gdf.geometry.unary_union.centroid
@@ -84,24 +92,31 @@ def incident_detector_cloud_function(event, context):
         }
         all_incidents.append(incident_data)
 
-    # --- MODIFIED: The payload now includes the run_date ---
-    master_payload = {
-        "run_date": run_date_str,
-        "total_clusters": len(all_incidents),
-        "incidents": all_incidents
-    }
+    # --- MODIFIED: Write incidents to GCS instead of putting in Pub/Sub ---
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+    output_blob_name = f"{INCIDENTS_GCS_PREFIX}/{run_date_str}/detected_incidents.jsonl"
     
+    # Convert each incident dict to a JSON string and join with newlines
+    jsonl_content = "\n".join([json.dumps(incident) for incident in all_incidents])
+    
+    blob = bucket.blob(output_blob_name)
+    blob.upload_from_string(jsonl_content, content_type='application/jsonl')
+    logging.info(f"Successfully wrote {len(all_incidents)} incidents to gs://{GCS_BUCKET_NAME}/{output_blob_name}")
+
+    # --- MODIFIED: Publish a lightweight notification message ---
     publisher = pubsub.PublisherClient()
     topic_path = publisher.topic_path(GCP_PROJECT_ID, OUTPUT_TOPIC_NAME)
     
-    message_json = json.dumps(master_payload, default=str)
+    notification_payload = {"run_date": run_date_str}
+    message_json = json.dumps(notification_payload)
     message_bytes = message_json.encode('utf-8')
 
     try:
         publish_future = publisher.publish(topic_path, data=message_bytes)
         publish_future.result()
-        logging.info(f"Successfully published a single batch message for run {run_date_str} with {len(all_incidents)} clusters.")
+        logging.info(f"Successfully published notification for run {run_date_str}.")
     except Exception as e:
-        logging.error(f"Failed to publish master message. Error: {e}")
+        logging.error(f"Failed to publish notification message. Error: {e}")
 
     logging.info("Incident Detector function finished successfully.")

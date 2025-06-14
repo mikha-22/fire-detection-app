@@ -4,10 +4,8 @@ import os
 import json
 import base64
 import logging
-from datetime import datetime
 
-from google.cloud import aiplatform
-from google.cloud import storage
+from google.cloud import aiplatform, storage
 from src.satellite_imagery_acquirer.acquirer import SatelliteImageryAcquirer
 
 # --- Configuration ---
@@ -17,27 +15,46 @@ GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME")
 VERTEX_AI_MODEL_NAME = os.environ.get("VERTEX_AI_OBJECT_DETECTION_MODEL")
 BATCH_PREDICTION_MACHINE_TYPE = "n1-standard-4"
 VERTEX_AI_BATCH_SERVICE_ACCOUNT = "fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com"
+INCIDENTS_GCS_PREFIX = "incidents" # Folder where incident data is stored
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def image_processor_cloud_function(event, context):
-    logging.info("Image Processor function triggered for a batch of incidents.")
+    logging.info("Image Processor function triggered.")
 
     if 'data' not in event:
         logging.error("No data found in the trigger event.")
         return
 
+    # --- MODIFIED: Decode the lightweight notification message ---
     message_data = base64.b64decode(event['data']).decode('utf-8')
-    batch_data = json.loads(message_data)
-    incidents = batch_data.get("incidents", [])
-    run_date = batch_data.get("run_date") # Get the date from the trigger message
+    notification_data = json.loads(message_data)
+    run_date = notification_data.get("run_date")
 
-    if not incidents or not run_date:
-        logging.warning("Received a batch message with no incidents or no run_date. Exiting.")
+    if not run_date:
+        logging.error("Received notification with no 'run_date'. Exiting.")
         return
 
-    logging.info(f"Processing a batch of {len(incidents)} incidents for run date: {run_date}.")
+    logging.info(f"Processing incidents for run_date: {run_date}.")
 
+    # --- MODIFIED: Read the incidents from the GCS file ---
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+    incidents_blob_name = f"{INCIDENTS_GCS_PREFIX}/{run_date}/detected_incidents.jsonl"
+    
+    try:
+        incidents_content = bucket.blob(incidents_blob_name).download_as_string().decode('utf-8')
+        incidents = [json.loads(line) for line in incidents_content.strip().split('\n')]
+        logging.info(f"Successfully loaded {len(incidents)} incidents from GCS.")
+    except Exception as e:
+        logging.error(f"Failed to read or parse incidents file from GCS: gs://{GCS_BUCKET_NAME}/{incidents_blob_name}. Error: {e}")
+        return
+
+    if not incidents:
+        logging.warning("Incidents file was empty or could not be parsed. Exiting.")
+        return
+
+    # The rest of the logic remains the same, as it's already date-based.
     regions_to_acquire = []
     for incident in incidents:
         cluster_id = incident.get("cluster_id")
@@ -56,7 +73,7 @@ def image_processor_cloud_function(event, context):
             logging.error("Failed to acquire any satellite images for the batch.")
             return
         
-        logging.info(f"Successfully acquired {len(gcs_image_uris)} of {len(regions_to_acquire)} requested images.")
+        logging.info(f"Successfully initiated export for {len(gcs_image_uris)} of {len(regions_to_acquire)} requested images.")
 
         batch_input_lines = []
         for region in regions_to_acquire:
@@ -74,12 +91,7 @@ def image_processor_cloud_function(event, context):
             return
 
         jsonl_content = "\n".join(batch_input_lines)
-        
-        # --- FINAL FIX: Use the run_date for all naming ---
         input_filename = f"incident_inputs/{run_date}.jsonl"
-        
-        storage_client = storage.Client()
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(input_filename)
         blob.upload_from_string(jsonl_content)
         logging.info(f"Uploaded batch input file to gs://{GCS_BUCKET_NAME}/{input_filename}")
@@ -91,7 +103,7 @@ def image_processor_cloud_function(event, context):
         job = model.batch_predict(
             job_display_name=job_display_name,
             gcs_source=f"gs://{GCS_BUCKET_NAME}/{input_filename}",
-            gcs_destination_prefix=f"gs://{GCS_BUCKET_NAME}/incident_outputs/{run_date}/", # Use run_date here
+            gcs_destination_prefix=f"gs://{GCS_BUCKET_NAME}/incident_outputs/{run_date}/",
             sync=False,
             machine_type=BATCH_PREDICTION_MACHINE_TYPE,
             service_account=VERTEX_AI_BATCH_SERVICE_ACCOUNT,

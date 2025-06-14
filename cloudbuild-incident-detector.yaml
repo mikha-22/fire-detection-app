@@ -22,7 +22,8 @@ steps:
   - '--entry-point=incident_detector_cloud_function'
   - '--trigger-topic=wildfire-pipeline-initiator'
   - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
-  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,FIRMS_API_KEY=0331973a7ee830ca7f026493faaa367a'
+  # --- MODIFICATION: Added GCS_BUCKET_NAME ---
+  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,FIRMS_API_KEY=0331973a7ee830ca7f026493faaa367a,GCS_BUCKET_NAME=fire-app-bucket'
   - '--timeout=540s'
   - '--memory=2GiB'
   - '--project=haryo-kebakaran'
