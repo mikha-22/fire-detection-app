@@ -62,7 +62,7 @@ class WildfirePredictor(Predictor):
             _log_json("CRITICAL", "Failed to load model artifacts.", error=str(e), exc_info=True) # Added exc_info=True
             raise RuntimeError(f"Failed to load model: {e}")
 
-    def preprocess(self, prediction_input: Dict[str, Any]) -> Tuple[Dict[str, Any], torch.Tensor]:
+    def preprocess(self, prediction_input: Dict[str, Any]) -> List[Tuple[Dict[str, Any], torch.Tensor]]:
         _log_json("DEBUG", "Received instance for preprocessing.", instance_data=prediction_input)
         Image.MAX_IMAGE_PIXELS = 2_000_000_000
 
@@ -71,66 +71,86 @@ class WildfirePredictor(Predictor):
         else:
             actual_instance = prediction_input
 
-        gcs_image_uri = actual_instance.get("gcs_image_uri")
-        instance_id = actual_instance.get("instance_id", "unknown")
+        batch_run_id = actual_instance.get("instance_id", "unknown_batch")
+        clusters_to_process = actual_instance.get("clusters")
 
-        if not gcs_image_uri:
-            _log_json("ERROR", "Missing 'gcs_image_uri' after unwrapping instance.", instance_id=instance_id, received_keys=list(actual_instance.keys()))
-            raise ValueError(f"Missing 'gcs_image_uri' for instance {instance_id}")
+        if not clusters_to_process or not isinstance(clusters_to_process, list):
+            _log_json("ERROR", "Missing 'clusters' list in the instance.", instance_id=batch_run_id)
+            raise ValueError(f"Instance {batch_run_id} is missing a 'clusters' list.")
 
-        try:
-            bucket_name, blob_name = gcs_image_uri.replace("gs://", "").split("/", 1)
-            blob = self._storage_client.bucket(bucket_name).blob(blob_name)
-            image_bytes = blob.download_as_bytes()
+        _log_json("INFO", f"Preprocessing {len(clusters_to_process)} clusters for batch {batch_run_id}.")
 
-            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            transformed_image = MODEL_INPUT_TRANSFORMS(image)
+        preprocessed_data = []
+        for cluster_data in clusters_to_process:
+            gcs_image_uri = cluster_data.get("gcs_image_uri")
+            cluster_id = cluster_data.get("cluster_id", "unknown_cluster")
+            
+            if not gcs_image_uri:
+                _log_json("WARNING", f"Skipping cluster {cluster_id} due to missing 'gcs_image_uri'.")
+                continue
+            
+            try:
+                bucket_name, blob_name = gcs_image_uri.replace("gs://", "").split("/", 1)
+                blob = self._storage_client.bucket(bucket_name).blob(blob_name)
+                image_bytes = blob.download_as_bytes()
 
-            _log_json("INFO", f"Preprocessing successful for instance {instance_id}.", image_uri=gcs_image_uri)
-            return (actual_instance, transformed_image)
+                image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                transformed_image = MODEL_INPUT_TRANSFORMS(image)
 
-        except Exception as e:
-            _log_json("CRITICAL", f"Preprocessing failed for instance {instance_id}.", error=str(e), exc_info=True) # Added exc_info=True
-            raise ValueError(f"Failed to preprocess instance {instance_id}: {e}")
+                preprocessed_data.append((cluster_data, transformed_image))
+                _log_json("INFO", f"Preprocessing successful for cluster {cluster_id}.", image_uri=gcs_image_uri)
 
-    def predict(self, instances: Tuple[Dict[str, Any], torch.Tensor]) -> List[Tuple[Dict[str, Any], torch.Tensor]]:
-        original_input, tensor = instances
+            except Exception as e:
+                _log_json("ERROR", f"Preprocessing failed for cluster {cluster_id}.", error=str(e), exc_info=True)
+        
+        return preprocessed_data
 
-        _log_json("INFO", "Performing inference on a single instance.", shape=str(tensor.shape), instance_id=original_input.get('instance_id', 'unknown')) # Added instance_id
-        batch_to_infer = tensor.unsqueeze(0).to(self._device)
+    def predict(self, instances: List[Tuple[Dict[str, Any], torch.Tensor]]) -> List[Tuple[Dict[str, Any], torch.Tensor]]:
+        if not instances:
+            _log_json("WARNING", "Predict received an empty list of instances. Nothing to do.")
+            return []
 
+        original_inputs = [item[0] for item in instances]
+        tensors_to_infer = [item[1] for item in instances]
+        
+        batch_to_infer = torch.stack(tensors_to_infer).to(self._device)
+        _log_json("INFO", f"Performing inference on a batch of {len(tensors_to_infer)} clusters.", shape=str(batch_to_infer.shape))
+        
         try:
             with torch.no_grad():
-                prediction_output = self._model(batch_to_infer)
-            _log_json("INFO", f"Inference successful for instance {original_input.get('instance_id', 'unknown')}.", output_shape=str(prediction_output.shape))
-            return [(original_input, prediction_output[0])]
+                prediction_outputs = self._model(batch_to_infer)
+            _log_json("INFO", "Inference successful for batch.", output_shape=str(prediction_outputs.shape))
+            
+            results = [(original_inputs[i], prediction_outputs[i]) for i in range(len(original_inputs))]
+            return results
         except Exception as e:
-            _log_json("CRITICAL", f"Prediction failed for instance {original_input.get('instance_id', 'unknown')}.", error=str(e), exc_info=True) # Added exc_info=True
-            raise RuntimeError(f"Prediction failed for instance {original_input.get('instance_id', 'unknown')}: {e}")
+            _log_json("CRITICAL", "Prediction failed for the entire batch.", error=str(e), exc_info=True)
+            raise RuntimeError(f"Prediction failed for batch: {e}")
 
 
     def postprocess(self, prediction_results: List[Tuple[Dict[str, Any], torch.Tensor]]) -> Dict[str, List[Dict[str, Any]]]:
         final_predictions = []
+        _log_json("INFO", f"Postprocessing {len(prediction_results)} individual cluster results.")
+        
         for original_input, inference_output in prediction_results:
             try:
-                probabilities = F.softmax(inference_output.unsqueeze(0), dim=1)
-                predicted_class = torch.argmax(probabilities, dim=1).item()
+                probabilities = F.softmax(inference_output, dim=0)
+                predicted_class = torch.argmax(probabilities).item()
                 is_detected = (predicted_class == 1)
-                confidence = probabilities[0][predicted_class].item()
+                confidence = probabilities[predicted_class].item()
 
                 final_predictions.append({
-                    "instance_id": original_input.get("instance_id", "unknown"),
+                    "instance_id": original_input.get("cluster_id", "unknown"),
                     "detected": bool(is_detected),
                     "confidence": float(confidence),
                     "detection_details": "Fire detected by AI model" if is_detected else "No fire detected by AI model",
                     "error_message": None
                 })
-                _log_json("INFO", f"Postprocessing successful for instance {original_input.get('instance_id', 'unknown')}.", detected=is_detected, confidence=confidence)
+                _log_json("INFO", f"Postprocessing successful for cluster {original_input.get('cluster_id', 'unknown')}.", detected=is_detected, confidence=confidence)
             except Exception as e:
-                _log_json("CRITICAL", f"Postprocessing failed for instance {original_input.get('instance_id', 'unknown')}.", error=str(e), exc_info=True) # Added exc_info=True
-                # Append a failed prediction entry so the batch job can still report results
+                _log_json("CRITICAL", f"Postprocessing failed for instance {original_input.get('cluster_id', 'unknown')}.", error=str(e), exc_info=True)
                 final_predictions.append({
-                    "instance_id": original_input.get("instance_id", "unknown"),
+                    "instance_id": original_input.get("cluster_id", "unknown"),
                     "detected": False,
                     "confidence": 0.0,
                     "detection_details": "Error during post-processing",

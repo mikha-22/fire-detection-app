@@ -76,8 +76,9 @@ def result_processor_cloud_function(event, context):
 
     master_input_blob_path = f"incident_inputs/{run_date}.jsonl"
     try:
-        all_inputs_str = bucket.blob(master_input_blob_path).download_as_string().decode('utf-8')
-        input_metadata = {json.loads(line)['instance_id']: json.loads(line) for line in all_inputs_str.strip().split('\n') if line}
+        input_instance_str = bucket.blob(master_input_blob_path).download_as_string().decode('utf-8')
+        input_instance = json.loads(input_instance_str)
+        input_metadata = {cluster['cluster_id']: cluster for cluster in input_instance['clusters']}
     except Exception as e:
         logging.error(f"Could not read or parse the master input file: {master_input_blob_path}. Error: {e}")
         return
@@ -95,40 +96,40 @@ def result_processor_cloud_function(event, context):
 
             try:
                 prediction_data = json.loads(line)
-                ai_detections = prediction_data.get('predictions')
-                if not ai_detections: continue
+                ai_detections_list = prediction_data.get('predictions')
+                if not ai_detections_list: continue
 
-                prediction = ai_detections[0]
-                cluster_id = prediction.get("instance_id")
-                
-                input_data = input_metadata.get(cluster_id)
-                if not input_data:
-                    logging.error(f"Could not find input metadata for cluster_id '{cluster_id}'")
-                    continue
+                for prediction in ai_detections_list:
+                    cluster_id = prediction.get("instance_id")
+                    
+                    input_data = input_metadata.get(cluster_id)
+                    if not input_data:
+                        logging.error(f"Could not find input metadata for cluster_id '{cluster_id}'")
+                        continue
 
-                original_image_uri = input_data['gcs_image_uri']
-                image_bbox = input_data['image_bbox']
-                
-                img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
-                image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
-                
-                visualizer = MapVisualizer()
-                
-                final_map_image = visualizer.generate_fire_map(
-                    base_image_bytes=image_bytes, 
-                    image_bbox=image_bbox, 
-                    ai_detections=ai_detections,
-                    acquisition_date_str=run_date
-                )
-                
-                map_output_path = f"{FINAL_OUTPUT_GCS_PREFIX}{run_date}/{cluster_id}_map.png"
-                map_blob = bucket.blob(map_output_path)
-                
-                img_byte_arr = BytesIO()
-                final_map_image.save(img_byte_arr, format='PNG')
-                map_blob.upload_from_string(img_byte_arr.getvalue(), content_type='image/png')
-                
-                logging.info(f"Successfully generated and uploaded map for '{cluster_id}' in run '{run_date}' to '{map_output_path}'.")
+                    original_image_uri = input_data['gcs_image_uri']
+                    image_bbox = input_data['image_bbox']
+                    
+                    img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
+                    image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
+                    
+                    visualizer = MapVisualizer()
+                    
+                    final_map_image = visualizer.generate_fire_map(
+                        base_image_bytes=image_bytes, 
+                        image_bbox=image_bbox, 
+                        ai_detections=[prediction],
+                        acquisition_date_str=run_date
+                    )
+                    
+                    map_output_path = f"{FINAL_OUTPUT_GCS_PREFIX}{run_date}/{cluster_id}_map.png"
+                    map_blob = bucket.blob(map_output_path)
+                    
+                    img_byte_arr = BytesIO()
+                    final_map_image.save(img_byte_arr, format='PNG')
+                    map_blob.upload_from_string(img_byte_arr.getvalue(), content_type='image/png')
+                    
+                    logging.info(f"Successfully generated and uploaded map for '{cluster_id}' in run '{run_date}' to '{map_output_path}'.")
 
             except Exception as e:
                 logging.error(f"Failed to process a prediction line: '{line}'. Error: {e}", exc_info=True)

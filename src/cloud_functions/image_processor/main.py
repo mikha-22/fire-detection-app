@@ -75,26 +75,31 @@ def image_processor_cloud_function(event, context):
         
         logging.info(f"Successfully initiated export for {len(gcs_image_uris)} of {len(regions_to_acquire)} requested images.")
 
-        batch_input_lines = []
+        clusters_for_batch = []
         for region in regions_to_acquire:
             cluster_id = region["id"]
             if cluster_id in gcs_image_uris:
-                batch_input = {
-                    "instance_id": cluster_id,
+                cluster_data = {
+                    "cluster_id": cluster_id,
                     "gcs_image_uri": gcs_image_uris[cluster_id],
-                    "image_bbox": region["bbox"] 
+                    "image_bbox": region["bbox"]
                 }
-                batch_input_lines.append(json.dumps(batch_input))
+                clusters_for_batch.append(cluster_data)
         
-        if not batch_input_lines:
+        if not clusters_for_batch:
             logging.error("No images were successfully processed to create a batch input file.")
             return
 
-        jsonl_content = "\n".join(batch_input_lines)
+        batch_instance = {
+            "instance_id": f"batch_run_{run_date.replace('-', '')}",
+            "clusters": clusters_for_batch
+        }
+        
+        jsonl_content = json.dumps(batch_instance)
         input_filename = f"incident_inputs/{run_date}.jsonl"
         blob = bucket.blob(input_filename)
         blob.upload_from_string(jsonl_content)
-        logging.info(f"Uploaded batch input file to gs://{GCS_BUCKET_NAME}/{input_filename}")
+        logging.info(f"Uploaded single-instance batch input file to gs://{GCS_BUCKET_NAME}/{input_filename}")
 
         aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
         model = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')[0]
