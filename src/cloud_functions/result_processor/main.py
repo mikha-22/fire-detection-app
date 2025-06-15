@@ -1,199 +1,223 @@
+# src/cloud_functions/result_processor/main.py
+
 import os
 import json
 import base64
-import io
 import logging
+import time
+from io import BytesIO
 from datetime import datetime
 
-import folium
 import pandas as pd
-from google.cloud import storage
+from google.cloud import storage, aiplatform
 from PIL import Image
-
-# Assuming the 'src' directory is in the deployment package, which is set up by cloudbuild.
+import folium
 from src.map_visualizer.visualizer import MapVisualizer
 
 # --- Configuration ---
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME")
-INCIDENTS_GCS_PREFIX = "incidents"
-BATCH_INPUT_GCS_PREFIX = "incident_inputs"
-BATCH_OUTPUT_GCS_PREFIX = "incident_outputs"
-FINAL_RESULTS_GCS_PREFIX = "final_reports"
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+GCP_REGION = os.environ.get("GCP_REGION")
+FINAL_OUTPUT_GCS_PREFIX = "final_outputs/"
+RETRY_ATTEMPTS = 10
+RETRY_DELAY_SECONDS = 60
 
-# --- Logging Setup ---
-# Standard logging is good, but structured JSON is better for GCP.
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-def _log_json(severity: str, message: str, **kwargs):
-    """
-    Prints a structured JSON log message to stdout for GCP Cloud Logging.
-    """
-    log_entry = {
-        "severity": severity.upper(),
-        "message": message,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "component": "ResultProcessor",
-        **kwargs
-    }
-    # This print statement is what sends the log to Cloud Logging.
-    print(json.dumps(log_entry))
+# --- Initializations ---
+# Added more detailed logging for clarity
+log_format = '%(asctime)s - %(levelname)s - [%(component)s] - %(message)s'
+logging.basicConfig(level=logging.INFO, format=log_format)
+logger = logging.getLogger(__name__)
 
+storage_client = storage.Client()
 
-def _get_gcs_blob_content(storage_client, bucket_name, blob_name):
-    """Downloads and returns the content of a blob from GCS with logging."""
-    gcs_path = f"gs://{bucket_name}/{blob_name}"
-    _log_json("INFO", "Attempting to download file from GCS.", gcs_path=gcs_path)
-    try:
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-        if not blob.exists():
-            _log_json("ERROR", "File not found at specified GCS path.", gcs_path=gcs_path)
-            return None
-        content = blob.download_as_string()
-        _log_json("INFO", "File download successful.", gcs_path=gcs_path, bytes_downloaded=len(content))
-        return content
-    except Exception as e:
-        _log_json("ERROR", "Failed to download file from GCS.", gcs_path=gcs_path, error=str(e), error_type=type(e).__name__)
-        return None
+try:
+    aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
+    logger.info("Vertex AI client initialized.", extra={'component': 'ResultProcessorInit'})
+except Exception as e:
+    logger.critical(f"Failed to initialize Vertex AI client. Error: {e}", extra={'component': 'ResultProcessorInit'})
+
+def log_with_component(message, severity="INFO", **kwargs):
+    """Helper function for structured logging."""
+    extra_info = {'component': 'ResultProcessor', **kwargs}
+    if severity.upper() == "INFO":
+        logger.info(message, extra=extra_info)
+    elif severity.upper() == "ERROR":
+        logger.error(message, extra=extra_info)
+    elif severity.upper() == "WARNING":
+        logger.warning(message, extra=extra_info)
+    else:
+        logger.debug(message, extra=extra_info)
 
 def result_processor_cloud_function(event, context):
-    """
-    Cloud Function triggered by Vertex AI Batch Prediction completion.
-    Consolidates data to produce a final interactive map report.
-    """
-    # Use context to get a unique ID for this function execution for better log tracking.
-    execution_id = context.event_id if context else 'local_run'
-    _log_json("INFO", "Result Processor function triggered.", trigger_event_id=execution_id)
+    trigger_event_id = context.event_id
+    log_with_component("Result Processor function triggered.", trigger_event_id=trigger_event_id)
 
-    if not GCS_BUCKET_NAME:
-        _log_json("CRITICAL", "GCS_BUCKET_NAME environment variable not set. Exiting.", execution_id=execution_id, status="failure")
+    if not all([GCS_BUCKET_NAME, GCP_PROJECT_ID, GCP_REGION]):
+        log_with_component("Missing required environment variables. Exiting.", "CRITICAL")
         return
 
-    storage_client = storage.Client()
-    run_date_str = datetime.utcnow().strftime('%Y-%m-%d')
-    _log_json("INFO", "Processing results based on current system date.", run_date=run_date_str, execution_id=execution_id)
+    run_date = datetime.utcnow().strftime('%Y-%m-%d')
+    log_with_component(
+        "Processing results based on current system date.",
+        run_date=run_date,
+        execution_id=trigger_event_id
+    )
 
-    # 1. --- Load Original Incident Data ---
-    _log_json("INFO", "Starting Step 1: Loading Original Incident Data.", execution_id=execution_id)
-    incidents_blob_name = f"{INCIDENTS_GCS_PREFIX}/{run_date_str}/detected_incidents.jsonl"
-    incidents_content = _get_gcs_blob_content(storage_client, GCS_BUCKET_NAME, incidents_blob_name)
-    if not incidents_content:
-        _log_json("CRITICAL", "Could not load incident data. Aborting process.", execution_id=execution_id, status="failure")
-        return
-    incidents_data = [json.loads(line) for line in incidents_content.strip().split(b'\n')]
-    incidents_df = pd.DataFrame(incidents_data)
-    incidents_df.rename(columns={'cluster_id': 'instance_id'}, inplace=True)
-    _log_json("INFO", "Step 1 Complete: Loaded original incidents.", incident_count=len(incidents_df), execution_id=execution_id)
-
-
-    # 2. --- Load Batch Prediction Input Data ---
-    _log_json("INFO", "Starting Step 2: Loading Batch Prediction Input Data.", execution_id=execution_id)
-    batch_input_blob_name = f"{BATCH_INPUT_GCS_PREFIX}/{run_date_str}.jsonl"
-    batch_input_content = _get_gcs_blob_content(storage_client, GCS_BUCKET_NAME, batch_input_blob_name)
-    if not batch_input_content:
-        _log_json("CRITICAL", "Could not load batch input data. Aborting process.", execution_id=execution_id, status="failure")
-        return
-    batch_input_data = json.loads(batch_input_content).get("clusters", [])
-    batch_input_df = pd.DataFrame(batch_input_data)
-    batch_input_df.rename(columns={'cluster_id': 'instance_id'}, inplace=True)
-    _log_json("INFO", "Step 2 Complete: Loaded batch prediction inputs.", input_count=len(batch_input_df), execution_id=execution_id)
-
-
-    # 3. --- Load AI Prediction Results ---
-    _log_json("INFO", "Starting Step 3: Loading AI Prediction Results.", execution_id=execution_id)
-    prediction_results_list = []
+    # --- Step 1: Load Original Incident Data ---
+    log_with_component("Starting Step 1: Loading Original Incident Data.", execution_id=trigger_event_id)
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
-    prediction_prefix = f"{BATCH_OUTPUT_GCS_PREFIX}/{run_date_str}/"
-    blobs_found = bucket.list_blobs(prefix=prediction_prefix)
-    
-    # Filter for the actual results file, which is often nested
-    prediction_files = [b for b in blobs_found if "prediction.results" in b.name]
+    incidents_blob_path = f"incidents/{run_date}/detected_incidents.jsonl"
+    log_with_component("Attempting to download file from GCS.", gcs_path=f"gs://{GCS_BUCKET_NAME}/{incidents_blob_path}")
+    try:
+        incidents_content = bucket.blob(incidents_blob_path).download_as_string()
+        log_with_component("File download successful.", gcs_path=f"gs://{GCS_BUCKET_NAME}/{incidents_blob_path}", bytes_downloaded=len(incidents_content))
+        incidents_data = [json.loads(line) for line in incidents_content.decode('utf-8').strip().split('\n')]
+        hotspots_by_cluster = {incident['cluster_id']: incident['hotspots'] for incident in incidents_data}
+        log_with_component("Step 1 Complete: Loaded original incidents.", incident_count=len(incidents_data), execution_id=trigger_event_id)
+    except Exception as e:
+        log_with_component(f"Could not read or parse the original incidents file: {incidents_blob_path}. Error: {e}", "ERROR", exc_info=True)
+        hotspots_by_cluster = {}
 
-    if not prediction_files:
-        _log_json("ERROR", "No prediction result files found in GCS.", search_prefix=prediction_prefix, execution_id=execution_id)
+    # --- Step 2: Load Batch Prediction Input Data ---
+    log_with_component("Starting Step 2: Loading Batch Prediction Input Data.", execution_id=trigger_event_id)
+    master_input_blob_path = f"incident_inputs/{run_date}.jsonl"
+    log_with_component("Attempting to download file from GCS.", gcs_path=f"gs://{GCS_BUCKET_NAME}/{master_input_blob_path}")
+    try:
+        input_instance_str = bucket.blob(master_input_blob_path).download_as_string()
+        log_with_component("File download successful.", gcs_path=f"gs://{GCS_BUCKET_NAME}/{master_input_blob_path}", bytes_downloaded=len(input_instance_str))
+        input_instance = json.loads(input_instance_str)
+        input_metadata = {cluster['cluster_id']: cluster for cluster in input_instance['clusters']}
+        log_with_component("Step 2 Complete: Loaded batch prediction inputs.", input_count=len(input_metadata), execution_id=trigger_event_id)
+    except Exception as e:
+        log_with_component(f"CRITICAL: Could not read or parse the master input file: {master_input_blob_path}. Cannot proceed. Error: {e}", "ERROR", exc_info=True)
         return
+
+    # --- Step 3: Find and Load AI Prediction Results ---
+    log_with_component("Starting Step 3: Loading AI Prediction Results.", execution_id=trigger_event_id)
+    gcs_output_prefix = f"incident_outputs/{run_date}/"
+    prediction_blobs = []
+    for attempt in range(RETRY_ATTEMPTS):
+        log_with_component(f"Checking for prediction files in '{gcs_output_prefix}'... (Attempt {attempt + 1}/{RETRY_ATTEMPTS})")
+        prediction_blobs = list(bucket.list_blobs(prefix=gcs_output_prefix))
+        if prediction_blobs:
+            log_with_component(f"Found {len(prediction_blobs)} blob(s) in prefix.")
+            break
+        if attempt < RETRY_ATTEMPTS - 1:
+            log_with_component(f"No prediction files found. Retrying in {RETRY_DELAY_SECONDS} seconds.", "WARNING")
+            time.sleep(RETRY_DELAY_SECONDS)
+
+    if not prediction_blobs:
+        log_with_component(f"No prediction result files found at prefix: {gcs_output_prefix} after {RETRY_ATTEMPTS} attempts. Exiting.", "ERROR")
+        return
+
+    # --- Step 4: Process Results and Generate Visualizations ---
+    log_with_component("Starting Step 4: Processing results and generating maps.", execution_id=trigger_event_id)
+    folium_map_data = []
+    for prediction_blob in prediction_blobs:
+        if 'prediction.results' not in prediction_blob.name:
+            continue
         
-    for blob in prediction_files:
-        _log_json("INFO", "Processing prediction result file.", gcs_path=f"gs://{GCS_BUCKET_NAME}/{blob.name}", execution_id=execution_id)
-        content = blob.download_as_string()
-        predictions = json.loads(content).get("predictions", [])
-        prediction_results_list.extend(predictions)
+        log_with_component("Processing prediction result file.", gcs_path=f"gs://{GCS_BUCKET_NAME}/{prediction_blob.name}")
+        prediction_content_str = prediction_blob.download_as_string().decode('utf-8')
+        
+        for line in prediction_content_str.strip().split('\n'):
+            if not line.strip(): continue
 
-    if not prediction_results_list:
-        _log_json("ERROR", "Prediction result files were found but contained no predictions.", search_prefix=prediction_prefix, execution_id=execution_id)
-        return
-    predictions_df = pd.DataFrame(prediction_results_list)
-    _log_json("INFO", "Step 3 Complete: Loaded AI prediction results.", result_count=len(predictions_df), execution_id=execution_id)
+            try:
+                # --- THE FINAL FIX IS HERE ---
+                # Vertex AI wraps the model's output in a standard format.
+                # We need to parse this wrapper to get to our predictions list.
+                full_output_line = json.loads(line)
+                prediction_wrapper = full_output_line.get('prediction', {})
+                ai_detections_list = prediction_wrapper.get('predictions')
+                
+                if not ai_detections_list:
+                    log_with_component("Skipping line, no 'predictions' key found inside the 'prediction' wrapper.", "WARNING", line_content=line)
+                    continue
 
-    # 4. --- Merge All Data Sources ---
-    _log_json("INFO", "Starting Step 4: Merging all data sources.", execution_id=execution_id)
-    merged_df = pd.merge(incidents_df, batch_input_df, on='instance_id', how='inner')
-    final_df = pd.merge(merged_df, predictions_df, on='instance_id', how='inner')
-    _log_json("INFO", "Step 4 Complete: Successfully merged data.", record_count=len(final_df), execution_id=execution_id,
-              data_columns=final_df.columns.tolist())
+                for prediction in ai_detections_list:
+                    cluster_id = prediction.get("instance_id")
+                    if not cluster_id:
+                        log_with_component("Skipping prediction with no instance_id.", "WARNING", prediction_data=prediction)
+                        continue
+                    
+                    input_data = input_metadata.get(cluster_id)
+                    if not input_data:
+                        log_with_component(f"Could not find input metadata for cluster_id '{cluster_id}'", "ERROR")
+                        continue
 
-    if final_df.empty:
-        _log_json("WARNING", "No matching records found after merging all data. Nothing to visualize. Exiting.", execution_id=execution_id, status="success_empty")
-        return
+                    original_image_uri = input_data['gcs_image_uri']
+                    image_bbox = input_data['image_bbox']
+                    
+                    img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
+                    image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
 
-    # 5. --- Generate and Upload Visuals ---
-    _log_json("INFO", "Starting Step 5: Generating and uploading visuals for each incident.", execution_id=execution_id)
-    visualizer = MapVisualizer()
-    map_center_lat = final_df['centroid_latitude'].iloc[0]
-    map_center_lon = final_df['centroid_longitude'].iloc[0]
-    daily_report_map = folium.Map(location=[map_center_lat, map_center_lon], zoom_start=7)
+                    cluster_hotspots = hotspots_by_cluster.get(cluster_id, [])
+                    firms_df = pd.DataFrame()
+                    if cluster_hotspots:
+                        hotspot_records = [h['properties'] for h in cluster_hotspots]
+                        firms_df = pd.DataFrame.from_records(hotspot_records)
+                    
+                    visualizer = MapVisualizer()
+                    final_map_image = visualizer.generate_fire_map(
+                        base_image_bytes=image_bytes, 
+                        image_bbox=image_bbox, 
+                        ai_detections=[prediction],
+                        firms_hotspots_df=firms_df,
+                        acquisition_date_str=run_date
+                    )
+                    
+                    img_byte_arr = BytesIO()
+                    final_map_image.save(img_byte_arr, format='PNG')
+                    encoded_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
-    for index, row in final_df.iterrows():
-        incident_id = row['instance_id']
-        _log_json("INFO", "Processing incident.", incident_id=incident_id, execution_id=execution_id)
-        try:
-            gcs_image_uri = row['gcs_image_uri']
-            image_blob_name = gcs_image_uri.replace(f"gs://{GCS_BUCKET_NAME}/", "")
-            image_bytes = _get_gcs_blob_content(storage_client, GCS_BUCKET_NAME, image_blob_name)
-            if not image_bytes:
-                _log_json("WARNING", "Skipping incident due to missing satellite image.", incident_id=incident_id, execution_id=execution_id)
-                continue
+                    folium_map_data.append({
+                        "cluster_id": cluster_id,
+                        "latitude": (image_bbox[1] + image_bbox[3]) / 2,
+                        "longitude": (image_bbox[0] + image_bbox[2]) / 2,
+                        "detected": prediction.get("detected"),
+                        "confidence": prediction.get("confidence", 0),
+                        "encoded_png": encoded_image
+                    })
 
-            firms_hotspots_df = pd.DataFrame([f['properties'] for f in row['hotspots']])
-            ai_detections = [{"detected": row['detected'], "confidence": row['confidence']}]
+            except Exception as e:
+                log_with_component(f"Failed to process a prediction line: '{line}'. Error: {e}", "ERROR", exc_info=True)
 
-            map_image_pil = visualizer.generate_fire_map(
-                base_image_bytes=image_bytes, image_bbox=row['image_bbox'],
-                ai_detections=ai_detections, firms_hotspots_df=firms_hotspots_df,
-                acquisition_date_str=run_date_str
-            )
+    # --- Step 5: Generate Final Interactive Report ---
+    if folium_map_data:
+        log_with_component(f"Starting Step 5: Generating final interactive report for {len(folium_map_data)} clusters.", execution_id=trigger_event_id)
+        m = folium.Map(location=[-2.5, 118], zoom_start=5)
 
-            buffer = io.BytesIO()
-            map_image_pil.save(buffer, format="PNG")
-            image_for_upload_bytes = buffer.getvalue()
-
-            final_image_blob_name = f"{FINAL_RESULTS_GCS_PREFIX}/{run_date_str}/{incident_id}.png"
-            bucket.blob(final_image_blob_name).upload_from_string(image_for_upload_bytes, content_type='image/png')
-            _log_json("INFO", "Uploaded generated map image for incident.", incident_id=incident_id, gcs_path=f"gs://{GCS_BUCKET_NAME}/{final_image_blob_name}", execution_id=execution_id)
-
-            encoded_image = base64.b64encode(image_for_upload_bytes).decode('utf-8')
-            popup_html = f"""<h4>Incident: {incident_id}</h4><b>AI Detection:</b> {'Fire' if row['detected'] else 'No Fire'}<br><b>AI Confidence:</b> {row['confidence']:.2f}<br><b>FIRMS Hotspots:</b> {row['point_count']}<br><img src="data:image/png;base64,{encoded_image}" width="400">"""
-            iframe = folium.IFrame(popup_html, width=430, height=480)
+        for item in folium_map_data:
+            image_uri = f"data:image/png;base64,{item['encoded_png']}"
+            popup_html = f"""
+            <h4>Cluster ID: {item['cluster_id']}</h4>
+            <p>
+              <b>AI Detection:</b> {'FIRE DETECTED' if item['detected'] else 'No Fire Detected'}<br>
+              <b>Confidence:</b> {item['confidence']:.2%}
+            </p>
+            <img src='{image_uri}' width='400'>
+            """
+            iframe = folium.IFrame(popup_html, width=430, height=450)
             popup = folium.Popup(iframe, max_width=430)
+            marker_color = 'red' if item['detected'] else 'green'
             
             folium.Marker(
-                location=[row['centroid_latitude'], row['centroid_longitude']], popup=popup,
-                tooltip=f"{incident_id} (AI: {'Fire' if row['detected'] else 'No Fire'})",
-                icon=folium.Icon(color='red' if row['detected'] else 'green', icon='fire')
-            ).add_to(daily_report_map)
-            _log_json("INFO", "Added marker to Folium map.", incident_id=incident_id, execution_id=execution_id)
+                location=[item['latitude'], item['longitude']],
+                popup=popup,
+                tooltip=item['cluster_id'],
+                icon=folium.Icon(color=marker_color, icon='fire', prefix='fa')
+            ).add_to(m)
 
-        except Exception as e:
-            _log_json("ERROR", "Failed to process and visualize an incident.", incident_id=incident_id, error=str(e), error_type=type(e).__name__, execution_id=execution_id)
+        report_filename = f"daily_interactive_report_{run_date}.html"
+        local_temp_path = f"/tmp/{report_filename}"
+        m.save(local_temp_path)
+        
+        report_blob_path = f"{FINAL_OUTPUT_GCS_PREFIX}{run_date}/{report_filename}"
+        bucket.blob(report_blob_path).upload_from_filename(local_temp_path, content_type='text/html')
+        
+        log_with_component(f"Successfully generated and uploaded interactive report to: gs://{GCS_BUCKET_NAME}/{report_blob_path}")
+    else:
+        log_with_component("No data was processed to generate a Folium map. This could be because the prediction files were empty or could not be parsed.", "ERROR", search_prefix=gcs_output_prefix, execution_id=trigger_event_id)
 
-    _log_json("INFO", "Step 5 Complete: Finished processing all incidents.", execution_id=execution_id)
-
-    # 6. --- Save and Upload Final Folium Map ---
-    _log_json("INFO", "Starting Step 6: Saving and Uploading Final Folium Map.", execution_id=execution_id)
-    final_map_html = daily_report_map.get_root().render()
-    final_map_blob_name = f"{FINAL_RESULTS_GCS_PREFIX}/{run_date_str}/daily_summary_map.html"
-    bucket.blob(final_map_blob_name).upload_from_string(final_map_html, content_type='text/html')
-
-    _log_json("INFO", "Step 6 Complete: Successfully generated and uploaded the final daily summary map.",
-              final_map_path=f"gs://{GCS_BUCKET_NAME}/{final_map_blob_name}", execution_id=execution_id)
-
-    _log_json("INFO", "Result Processor function finished successfully.", execution_id=execution_id, status="success")
+    log_with_component("Result Processor function finished successfully.", execution_id=trigger_event_id)
