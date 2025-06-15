@@ -57,9 +57,15 @@ def result_processor_cloud_function(event, context):
 
         master_input_blob_path = f"incident_inputs/{run_date}.jsonl"
         logger.info(f"Attempting to download batch inputs from: {master_input_blob_path}")
-        input_instance_str = bucket.blob(master_input_blob_path).download_as_string().decode('utf-8')
-        input_instance = json.loads(input_instance_str)
-        input_metadata = {cluster['cluster_id']: cluster for cluster in input_instance['clusters']}
+        input_content = bucket.blob(master_input_blob_path).download_as_string().decode('utf-8')
+        
+        # Parse all input instances to build metadata
+        input_metadata = {}
+        for line in input_content.strip().split('\n'):
+            instance = json.loads(line)
+            for cluster in instance.get('clusters', []):
+                input_metadata[cluster['cluster_id']] = cluster
+                
     except Exception as e:
         logger.error(f"CRITICAL: Failed to load prerequisite data (incidents or inputs). Error: {e}", exc_info=True)
         return
@@ -98,16 +104,26 @@ def result_processor_cloud_function(event, context):
                 # Extract the prediction data - it's directly in the 'prediction' field
                 prediction = full_output_line.get('prediction', {})
                 
-                # The cluster_id is the instance_id in the prediction
-                cluster_id = prediction.get("instance_id")
+                # With one-per-instance, we need to get the cluster from the instance
+                instance_data = full_output_line.get('instance', {})
+                clusters_in_instance = instance_data.get('clusters', [])
+                
+                if not clusters_in_instance:
+                    logger.warning(f"No clusters found in instance: {instance_data}")
+                    continue
+                
+                # Get the first (and only) cluster from this instance
+                cluster_data = clusters_in_instance[0]
+                cluster_id = cluster_data.get('cluster_id')
+                
                 if not cluster_id:
-                    logger.warning(f"No instance_id found in prediction: {prediction}")
+                    logger.warning(f"No cluster_id found in cluster data: {cluster_data}")
                     continue
                     
                 input_data = input_metadata.get(cluster_id)
                 if not input_data:
-                    logger.error(f"Could not find input metadata for cluster_id '{cluster_id}'")
-                    continue
+                    # For one-per-instance, the cluster data is in the prediction itself
+                    input_data = cluster_data
 
                 original_image_uri = input_data['gcs_image_uri']
                 image_bbox = input_data['image_bbox']
