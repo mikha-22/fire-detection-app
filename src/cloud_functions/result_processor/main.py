@@ -95,18 +95,25 @@ def result_processor_cloud_function(event, context):
             if not line.strip(): continue
 
             try:
-                # The line from Vertex AI contains a JSON object.
                 full_output_line = json.loads(line)
                 
-                # --- BUG FIX & SOLUTION ---
-                # The prediction from our model is nested. We need to parse it correctly.
-                # The key from the predictor is 'predictions' (plural) and it contains a LIST.
-                prediction_wrapper = full_output_line.get('prediction', {})
-                predictions_list = prediction_wrapper.get('predictions', [])
+                # --- ROBUST PARSING LOGIC ---
+                prediction_json = full_output_line.get('prediction', {})
+                predictions_list = []
 
-                # Process each prediction in the list (usually just one per line)
+                if isinstance(prediction_json, list):
+                    # Handles case where "prediction" value is a list: {"prediction": [...]}
+                    predictions_list = prediction_json
+                elif isinstance(prediction_json, dict):
+                    # Handles case where "prediction" value is a dict: {"prediction": {"predictions": [...]}}
+                    predictions_list = prediction_json.get('predictions', [])
+                
+                if not predictions_list:
+                    logger.warning(f"Could not find a list of predictions in line: {line}")
+                    continue
+                # --- END OF ROBUST PARSING ---
+
                 for prediction in predictions_list:
-                    # The 'instance_id' in the prediction corresponds to our 'cluster_id'
                     cluster_id = prediction.get('instance_id')
                     
                     if not cluster_id:
@@ -134,7 +141,7 @@ def result_processor_cloud_function(event, context):
                     final_map_image = visualizer.generate_fire_map(
                         base_image_bytes=image_bytes, 
                         image_bbox=image_bbox, 
-                        ai_detections=[prediction], # Pass the single prediction object for this cluster
+                        ai_detections=[prediction],
                         firms_hotspots_df=firms_df,
                         acquisition_date_str=run_date
                     )
@@ -151,7 +158,6 @@ def result_processor_cloud_function(event, context):
                         "confidence": prediction.get("confidence", 0),
                         "encoded_png": encoded_image
                     })
-                # --- END OF FIX ---
 
             except Exception as e:
                 logger.error(f"Failed to process a prediction line: '{line}'. Error: {e}", exc_info=True)
@@ -191,6 +197,6 @@ def result_processor_cloud_function(event, context):
         
         logger.info(f"Successfully generated and uploaded interactive report to: gs://{GCS_BUCKET_NAME}/{report_blob_path}")
     else:
-        logger.error(f"No data was successfully processed to generate a Folium map.")
+        logger.error("No data was successfully processed to generate a Folium map.")
 
     logger.info("Result Processor function finished successfully.")
