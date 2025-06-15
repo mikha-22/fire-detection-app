@@ -35,7 +35,10 @@ def image_processor_cloud_function(event, context):
     _log_json("INFO", "Image Processor function triggered.")
 
     run_date = datetime.utcnow().strftime('%Y-%m-%d')
-    _log_json("INFO", f"Processing for run_date determined by system clock: {run_date}.")
+    run_timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    job_id = f"job_{run_timestamp}"
+    
+    _log_json("INFO", f"Processing for run_date: {run_date}, job_id: {job_id}")
 
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
@@ -129,25 +132,76 @@ def image_processor_cloud_function(event, context):
             jsonl_lines.append(json.dumps(instance))
         
         jsonl_content = "\n".join(jsonl_lines)
-        input_filename = f"incident_inputs/{run_date}.jsonl"
+        input_filename = f"incident_inputs/{run_date}/{job_id}/input.jsonl"
         blob = bucket.blob(input_filename)
         blob.upload_from_string(jsonl_content)
         _log_json("INFO", f"Uploaded {len(jsonl_lines)} instances to gs://{GCS_BUCKET_NAME}/{input_filename}")
 
+        # Create a metadata file for this job
+        job_metadata = {
+            "job_id": job_id,
+            "run_date": run_date,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "incident_count": len(incidents),
+            "cluster_count": len(clusters_for_batch),
+            "input_file": input_filename,
+            "status": "submitted"
+        }
+        
+        metadata_filename = f"incident_outputs/{run_date}/{job_id}/metadata.json"
+        metadata_blob = bucket.blob(metadata_filename)
+        metadata_blob.upload_from_string(json.dumps(job_metadata, indent=2))
+        _log_json("INFO", f"Created job metadata at gs://{GCS_BUCKET_NAME}/{metadata_filename}")
+
         aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
         model = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')[0]
 
-        job_display_name = f"batch_prediction_{run_date}"
+        job_display_name = f"batch_prediction_{run_date}_{job_id}"
+        
+        # Use a clean output path with just the job_id
+        output_uri_prefix = f"gs://{GCS_BUCKET_NAME}/incident_outputs/{run_date}/{job_id}/"
+        
         job = model.batch_predict(
             job_display_name=job_display_name,
             gcs_source=f"gs://{GCS_BUCKET_NAME}/{input_filename}",
-            gcs_destination_prefix=f"gs://{GCS_BUCKET_NAME}/incident_outputs/{run_date}/",
+            gcs_destination_prefix=output_uri_prefix,
             sync=False,
             machine_type=BATCH_PREDICTION_MACHINE_TYPE,
             service_account=VERTEX_AI_BATCH_SERVICE_ACCOUNT,
         )
         
-        _log_json("INFO", f"Successfully submitted Vertex AI Batch Prediction job. Display name: {job_display_name}")
+        _log_json("INFO", f"Successfully submitted Vertex AI Batch Prediction job.",
+                  job_display_name=job_display_name,
+                  job_id=job_id,
+                  output_location=output_uri_prefix)
+        
+        # Update metadata with job information
+        job_metadata["vertex_ai_job_name"] = job.resource_name
+        job_metadata["vertex_ai_job_display_name"] = job_display_name
+        job_metadata["output_location"] = output_uri_prefix
+        metadata_blob.upload_from_string(json.dumps(job_metadata, indent=2))
+        
+        # Also create/update a manifest file that lists all jobs for this date
+        manifest_filename = f"incident_outputs/{run_date}/manifest.json"
+        manifest_blob = bucket.blob(manifest_filename)
+        
+        try:
+            # Try to load existing manifest
+            existing_manifest = json.loads(manifest_blob.download_as_string())
+        except:
+            # Create new manifest if it doesn't exist
+            existing_manifest = {"run_date": run_date, "jobs": []}
+        
+        # Add this job to the manifest
+        existing_manifest["jobs"].append({
+            "job_id": job_id,
+            "created_at": job_metadata["created_at"],
+            "vertex_ai_job_name": job.resource_name,
+            "status": "submitted"
+        })
+        
+        manifest_blob.upload_from_string(json.dumps(existing_manifest, indent=2))
+        _log_json("INFO", f"Updated job manifest for date {run_date}")
 
     except Exception as e:
         _log_json("ERROR", f"An error occurred during batch image processing. Error: {e}", exc_info=True)
