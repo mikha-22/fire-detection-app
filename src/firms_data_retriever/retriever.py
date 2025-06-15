@@ -14,7 +14,8 @@ from src.common.config import MONITORED_REGIONS
 # --- Configuration ---
 FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
 FIRMS_API_BASE_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
-FIRMS_SENSORS = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT"]
+# --- RECOMMENDED FIX: Added the newest VIIRS NRT sensor for the best coverage ---
+FIRMS_SENSORS = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT"]
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -143,8 +144,6 @@ class FirmsDataRetriever:
 
         combined_df = pd.concat(all_firms_data, ignore_index=True)
         
-        # --- MODIFIED LOGIC BLOCK ---
-        # If no regions are specified, return the full, confidence-filtered global dataset.
         if not monitored_regions:
             _log_json("INFO", "No regions provided, returning global FIRMS dataset after confidence filter.")
             if 'confidence' in combined_df.columns:
@@ -152,12 +151,10 @@ class FirmsDataRetriever:
                 confidence_values_to_keep = ['h', 'n']
                 return combined_df[combined_df['confidence'].isin(confidence_values_to_keep)].copy()
             return combined_df
-        # --- END MODIFIED LOGIC BLOCK ---
 
         initial_rows = len(combined_df)
         _log_json("INFO", "Combined raw FIRMS data from all sensors.", total_hotspots_before_filter=initial_rows)
 
-        # Ensure required columns exist, even if they are all None initially from some sensors.
         required_cols = [
             'latitude', 'longitude', 'acq_date', 'acq_time', 'confidence',
             'frp', 'daynight', 'satellite'
@@ -245,6 +242,3 @@ class FirmsDataRetriever:
         _log_json("INFO", "FIRMS data retrieval and filtering complete using /api/area/.",
                   total_filtered_hotspots=len(final_df))
         return final_df
-
-# --- Example Usage (for local testing) ---
-# ... (local testing part is unchanged) ...
