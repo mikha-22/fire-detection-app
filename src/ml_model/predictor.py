@@ -4,7 +4,7 @@ import os
 import io
 import json
 import logging
-import traceback # <--- ADD THIS IMPORT
+import traceback
 from typing import Any, Dict, List, Tuple
 
 import torch
@@ -30,79 +30,70 @@ class WildfirePredictor(Predictor):
 
     def load(self, artifacts_uri: str) -> None:
         _log_json("INFO", "Starting model artifact loading.", artifacts_uri=artifacts_uri)
-
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         _log_json("INFO", f"Using device: {self._device}")
-
         self._storage_client = storage.Client()
         _log_json("INFO", "Google Cloud Storage client initialized successfully.")
-
         model_pt_path_gcs = os.path.join(artifacts_uri, "model.pth")
         _log_json("INFO", "Attempting to download model from GCS.", path=model_pt_path_gcs)
-
         try:
             local_model_path = "/tmp/model.pth"
             bucket_name, blob_name = model_pt_path_gcs.replace("gs://", "").split("/", 1)
             bucket = self._storage_client.bucket(bucket_name)
             blob = bucket.blob(blob_name)
             blob.download_to_filename(local_model_path)
-
             _log_json("INFO", "Model downloaded successfully, now loading into memory.")
-
             self._model = DummyFireDetectionModel()
-            # Ensure weights_only=False if your model's state_dict might contain metadata
-            # For a dummy model, weights_only=True is usually fine, but keep in mind.
             self._model.load_state_dict(torch.load(local_model_path, map_location=self._device, weights_only=True))
             self._model.to(self._device)
             self._model.eval()
-
             _log_json("INFO", "Model loaded and ready for prediction.")
-
         except Exception as e:
-            _log_json("CRITICAL", "Failed to load model artifacts.", error=str(e), exc_info=True) # Added exc_info=True
+            _log_json("CRITICAL", "Failed to load model artifacts.", error=str(e), exc_info=True)
             raise RuntimeError(f"Failed to load model: {e}")
 
     def preprocess(self, prediction_input: Dict[str, Any]) -> List[Tuple[Dict[str, Any], torch.Tensor]]:
-        _log_json("DEBUG", "Received instance for preprocessing.", instance_data=prediction_input)
+        """
+        Handles both single JSONL lines and batch JSON requests.
+        """
+        _log_json("DEBUG", "Received payload for preprocessing.", payload=prediction_input)
         Image.MAX_IMAGE_PIXELS = 2_000_000_000
 
-        if "instances" in prediction_input and isinstance(prediction_input["instances"], list) and prediction_input["instances"]:
-            actual_instance = prediction_input["instances"][0]
-        else:
-            actual_instance = prediction_input
-
-        batch_run_id = actual_instance.get("instance_id", "unknown_batch")
-        clusters_to_process = actual_instance.get("clusters")
-
-        if not clusters_to_process or not isinstance(clusters_to_process, list):
-            _log_json("ERROR", "Missing 'clusters' list in the instance.", instance_id=batch_run_id)
-            raise ValueError(f"Instance {batch_run_id} is missing a 'clusters' list.")
-
-        _log_json("INFO", f"Preprocessing {len(clusters_to_process)} clusters for batch {batch_run_id}.")
+        instances = prediction_input.get("instances", [])
+        if not instances:
+            # If "instances" key is not present, assume the entire payload is a single instance.
+            # This handles the case for a single line from a JSONL file.
+            instances = [prediction_input]
 
         preprocessed_data = []
-        for cluster_data in clusters_to_process:
-            gcs_image_uri = cluster_data.get("gcs_image_uri")
-            cluster_id = cluster_data.get("cluster_id", "unknown_cluster")
+        for instance in instances:
+            # Each instance from our image_processor contains a 'clusters' list (usually with one item)
+            clusters_to_process = instance.get("clusters", [])
             
-            if not gcs_image_uri:
-                _log_json("WARNING", f"Skipping cluster {cluster_id} due to missing 'gcs_image_uri'.")
-                continue
-            
-            try:
-                bucket_name, blob_name = gcs_image_uri.replace("gs://", "").split("/", 1)
-                blob = self._storage_client.bucket(bucket_name).blob(blob_name)
-                image_bytes = blob.download_as_bytes()
+            for cluster_data in clusters_to_process:
+                gcs_image_uri = cluster_data.get("gcs_image_uri")
+                cluster_id = cluster_data.get("cluster_id", "unknown_cluster")
+                
+                if not gcs_image_uri:
+                    _log_json("WARNING", f"Skipping cluster {cluster_id} due to missing 'gcs_image_uri'.")
+                    continue
+                
+                try:
+                    bucket_name, blob_name = gcs_image_uri.replace("gs://", "").split("/", 1)
+                    blob = self._storage_client.bucket(bucket_name).blob(blob_name)
+                    image_bytes = blob.download_as_bytes()
 
-                image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-                transformed_image = MODEL_INPUT_TRANSFORMS(image)
+                    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                    transformed_image = MODEL_INPUT_TRANSFORMS(image)
 
-                preprocessed_data.append((cluster_data, transformed_image))
-                _log_json("INFO", f"Preprocessing successful for cluster {cluster_id}.", image_uri=gcs_image_uri)
+                    # Pass the original cluster data along with the tensor
+                    preprocessed_data.append((cluster_data, transformed_image))
+                    _log_json("INFO", f"Preprocessing successful for cluster {cluster_id}.", image_uri=gcs_image_uri)
 
-            except Exception as e:
-                _log_json("ERROR", f"Preprocessing failed for cluster {cluster_id}.", error=str(e), exc_info=True)
+                except Exception as e:
+                    _log_json("ERROR", f"Preprocessing failed for cluster {cluster_id}.", error=str(e), exc_info=True)
         
+        _log_json("INFO", f"Successfully preprocessed {len(preprocessed_data)} total items for the model.")
         return preprocessed_data
 
     def predict(self, instances: List[Tuple[Dict[str, Any], torch.Tensor]]) -> List[Tuple[Dict[str, Any], torch.Tensor]]:

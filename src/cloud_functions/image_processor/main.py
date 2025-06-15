@@ -20,16 +20,23 @@ INCIDENTS_GCS_PREFIX = "incidents" # Folder where incident data is stored
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
+# --- Helper for logging structured data ---
+def _log_json(severity: str, message: str, **kwargs):
+    log_entry = {
+        "severity": severity.upper(),
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "component": "ImageProcessor",
+        **kwargs
+    }
+    print(json.dumps(log_entry))
+
 def image_processor_cloud_function(event, context):
-    logging.info("Image Processor function triggered.")
+    _log_json("INFO", "Image Processor function triggered.")
 
-    # --- MODIFIED: The function now determines its own execution date. ---
-    # It no longer relies on the Pub/Sub message for the date.
-    # This assumes the function runs on the same UTC day as the incident_detector.
     run_date = datetime.utcnow().strftime('%Y-%m-%d')
-    logging.info(f"Processing for run_date determined by system clock: {run_date}.")
+    _log_json("INFO", f"Processing for run_date determined by system clock: {run_date}.")
 
-    # --- Read the incidents from the GCS file based on the determined date ---
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     incidents_blob_name = f"{INCIDENTS_GCS_PREFIX}/{run_date}/detected_incidents.jsonl"
@@ -37,14 +44,13 @@ def image_processor_cloud_function(event, context):
     try:
         incidents_content = bucket.blob(incidents_blob_name).download_as_string().decode('utf-8')
         incidents = [json.loads(line) for line in incidents_content.strip().split('\n')]
-        logging.info(f"Successfully loaded {len(incidents)} incidents from GCS for date {run_date}.")
+        _log_json("INFO", f"Successfully loaded {len(incidents)} incidents from GCS for date {run_date}.")
     except Exception as e:
-        # This will fail if this function runs on a different UTC day than the previous one.
-        logging.error(f"Failed to read incidents file from GCS: gs://{GCS_BUCKET_NAME}/{incidents_blob_name}. Error: {e}")
+        _log_json("ERROR", f"Failed to read incidents file from GCS: gs://{GCS_BUCKET_NAME}/{incidents_blob_name}. Error: {e}")
         return
 
     if not incidents:
-        logging.warning("Incidents file was empty or could not be parsed. Exiting.")
+        _log_json("WARNING", "Incidents file was empty or could not be parsed. Exiting.")
         return
 
     regions_to_acquire = []
@@ -53,11 +59,40 @@ def image_processor_cloud_function(event, context):
         lat = incident.get("centroid_latitude")
         lon = incident.get("centroid_longitude")
         if not all([cluster_id, lat, lon]): continue
+
+        # --- NEW: DYNAMIC BOUNDING BOX SIZING LOGIC ---
+        point_count = incident.get("point_count", 0)
         
-        # --- MODIFIED: Increased bbox_size for better context ---
-        bbox_size = 0.2
+        # Define the tiers for area size based on hotspot count
+        # Using an approximation for degrees -> km conversion near the equator
+        KM_PER_DEGREE = 111.0 
+
+        if point_count <= 10:
+            # Small cluster (2-10 hotspots) -> 10km box
+            analysis_level = "Small"
+            bbox_size_km = 10.0
+        elif point_count <= 50:
+            # Medium cluster (11-50 hotspots) -> 20km box
+            analysis_level = "Medium"
+            bbox_size_km = 20.0
+        else:
+            # Large cluster (>50 hotspots) -> 40km box
+            analysis_level = "Large"
+            bbox_size_km = 40.0
         
-        cluster_bbox = [lon - bbox_size/2, lat - bbox_size/2, lon + bbox_size/2, lat + bbox_size/2]
+        # Convert the desired km box into degrees for GEE
+        bbox_size_degrees = bbox_size_km / KM_PER_DEGREE
+
+        _log_json("INFO", f"Determined analysis level for cluster {cluster_id}",
+                  details={
+                      "cluster_id": cluster_id,
+                      "point_count": point_count,
+                      "analysis_level": analysis_level,
+                      "bbox_km": bbox_size_km,
+                      "bbox_degrees": round(bbox_size_degrees, 4)
+                  })
+        
+        cluster_bbox = [lon - bbox_size_degrees/2, lat - bbox_size_degrees/2, lon + bbox_size_degrees/2, lat + bbox_size_degrees/2]
         regions_to_acquire.append({"id": cluster_id, "name": f"Incident area for {cluster_id}", "bbox": cluster_bbox})
 
     try:
@@ -65,10 +100,10 @@ def image_processor_cloud_function(event, context):
         gcs_image_uris = imagery_acquirer.acquire_and_export_imagery(regions_to_acquire, acquisition_date=run_date)
 
         if not gcs_image_uris:
-            logging.error("Failed to acquire any satellite images for the batch.")
+            _log_json("ERROR", "Failed to acquire any satellite images for the batch.")
             return
         
-        logging.info(f"Successfully initiated export for {len(gcs_image_uris)} of {len(regions_to_acquire)} requested images.")
+        _log_json("INFO", f"Successfully initiated export for {len(gcs_image_uris)} of {len(regions_to_acquire)} requested images.")
 
         clusters_for_batch = []
         for region in regions_to_acquire:
@@ -82,15 +117,14 @@ def image_processor_cloud_function(event, context):
                 clusters_for_batch.append(cluster_data)
         
         if not clusters_for_batch:
-            logging.error("No images were successfully processed to create a batch input file.")
+            _log_json("ERROR", "No images were successfully processed to create a batch input file.")
             return
 
-        # Create multiple instances for parallel processing
         jsonl_lines = []
         for cluster in clusters_for_batch:
             instance = {
                 "instance_id": cluster["cluster_id"],
-                "clusters": [cluster]  # Single cluster per instance
+                "clusters": [cluster]
             }
             jsonl_lines.append(json.dumps(instance))
         
@@ -98,7 +132,7 @@ def image_processor_cloud_function(event, context):
         input_filename = f"incident_inputs/{run_date}.jsonl"
         blob = bucket.blob(input_filename)
         blob.upload_from_string(jsonl_content)
-        logging.info(f"Uploaded {len(jsonl_lines)} instances to gs://{GCS_BUCKET_NAME}/{input_filename}")
+        _log_json("INFO", f"Uploaded {len(jsonl_lines)} instances to gs://{GCS_BUCKET_NAME}/{input_filename}")
 
         aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
         model = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')[0]
@@ -113,10 +147,10 @@ def image_processor_cloud_function(event, context):
             service_account=VERTEX_AI_BATCH_SERVICE_ACCOUNT,
         )
         
-        logging.info(f"Successfully submitted Vertex AI Batch Prediction job. Display name: {job_display_name}")
+        _log_json("INFO", f"Successfully submitted Vertex AI Batch Prediction job. Display name: {job_display_name}")
 
     except Exception as e:
-        logging.error(f"An error occurred during batch image processing. Error: {e}", exc_info=True)
+        _log_json("ERROR", f"An error occurred during batch image processing. Error: {e}", exc_info=True)
         raise
 
-    logging.info("Image Processor function finished for the batch.")
+    _log_json("INFO", "Image Processor function finished for the batch.")
