@@ -92,56 +92,56 @@ def result_processor_cloud_function(event, context):
             if not line.strip(): continue
 
             try:
-                # --- THIS IS THE FINAL FIX ---
-                # Vertex AI wraps our model's output. We need to parse that wrapper.
+                # Parse the Vertex AI output
                 full_output_line = json.loads(line)
-                prediction_wrapper = full_output_line.get('prediction', {})
-                ai_detections_list = prediction_wrapper.get('predictions')
                 
-                if not ai_detections_list:
-                    logger.warning(f"Skipping line, no 'predictions' key found inside the 'prediction' wrapper: {line}")
+                # Extract the prediction data - it's directly in the 'prediction' field
+                prediction = full_output_line.get('prediction', {})
+                
+                # The cluster_id is the instance_id in the prediction
+                cluster_id = prediction.get("instance_id")
+                if not cluster_id:
+                    logger.warning(f"No instance_id found in prediction: {prediction}")
+                    continue
+                    
+                input_data = input_metadata.get(cluster_id)
+                if not input_data:
+                    logger.error(f"Could not find input metadata for cluster_id '{cluster_id}'")
                     continue
 
-                for prediction in ai_detections_list:
-                    cluster_id = prediction.get("instance_id")
-                    input_data = input_metadata.get(cluster_id)
-                    if not input_data:
-                        logger.error(f"Could not find input metadata for cluster_id '{cluster_id}'")
-                        continue
+                original_image_uri = input_data['gcs_image_uri']
+                image_bbox = input_data['image_bbox']
+                
+                img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
+                image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
 
-                    original_image_uri = input_data['gcs_image_uri']
-                    image_bbox = input_data['image_bbox']
-                    
-                    img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
-                    image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
+                cluster_hotspots = hotspots_by_cluster.get(cluster_id, [])
+                firms_df = pd.DataFrame()
+                if cluster_hotspots:
+                    hotspot_records = [h['properties'] for h in cluster_hotspots]
+                    firms_df = pd.DataFrame.from_records(hotspot_records)
+                
+                visualizer = MapVisualizer()
+                final_map_image = visualizer.generate_fire_map(
+                    base_image_bytes=image_bytes, 
+                    image_bbox=image_bbox, 
+                    ai_detections=[prediction],  # Pass the prediction as a single-item list
+                    firms_hotspots_df=firms_df,
+                    acquisition_date_str=run_date
+                )
+                
+                img_byte_arr = BytesIO()
+                final_map_image.save(img_byte_arr, format='PNG')
+                encoded_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
-                    cluster_hotspots = hotspots_by_cluster.get(cluster_id, [])
-                    firms_df = pd.DataFrame()
-                    if cluster_hotspots:
-                        hotspot_records = [h['properties'] for h in cluster_hotspots]
-                        firms_df = pd.DataFrame.from_records(hotspot_records)
-                    
-                    visualizer = MapVisualizer()
-                    final_map_image = visualizer.generate_fire_map(
-                        base_image_bytes=image_bytes, 
-                        image_bbox=image_bbox, 
-                        ai_detections=[prediction],
-                        firms_hotspots_df=firms_df,
-                        acquisition_date_str=run_date
-                    )
-                    
-                    img_byte_arr = BytesIO()
-                    final_map_image.save(img_byte_arr, format='PNG')
-                    encoded_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
-
-                    folium_map_data.append({
-                        "cluster_id": cluster_id,
-                        "latitude": (image_bbox[1] + image_bbox[3]) / 2,
-                        "longitude": (image_bbox[0] + image_bbox[2]) / 2,
-                        "detected": prediction.get("detected"),
-                        "confidence": prediction.get("confidence", 0),
-                        "encoded_png": encoded_image
-                    })
+                folium_map_data.append({
+                    "cluster_id": cluster_id,
+                    "latitude": (image_bbox[1] + image_bbox[3]) / 2,
+                    "longitude": (image_bbox[0] + image_bbox[2]) / 2,
+                    "detected": prediction.get("detected"),
+                    "confidence": prediction.get("confidence", 0),
+                    "encoded_png": encoded_image
+                })
 
             except Exception as e:
                 logger.error(f"Failed to process a prediction line: '{line}'. Error: {e}", exc_info=True)
