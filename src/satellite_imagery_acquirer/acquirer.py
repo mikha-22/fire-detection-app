@@ -12,8 +12,8 @@ from src.common.config import GCS_BUCKET_NAME
 # --- Configuration ---
 GCS_IMAGE_OUTPUT_PREFIX = "raw_satellite_imagery/"
 SENTINEL2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
-# --- MODIFICATION: Increased cloud tolerance ---
-CLOUD_COVER_THRESHOLD = 40 # Increased from 20 to 40 to be more flexible
+# --- MODIFICATION: Increased cloud tolerance SIGNIFICANTLY ---
+CLOUD_COVER_THRESHOLD = 80 # Increased from 40 to 80 to maximize chances of getting an image
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
