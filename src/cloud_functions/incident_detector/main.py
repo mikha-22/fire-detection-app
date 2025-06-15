@@ -95,14 +95,16 @@ def result_processor_cloud_function(event, context):
             if not line.strip(): continue
 
             try:
-                # --- BUG FIX: Correctly loop through the list of predictions ---
+                # --- BUG FIX & SOLUTION ---
+                # The line from Vertex AI contains a JSON object.
                 full_output_line = json.loads(line)
                 
-                # The key from Vertex AI is 'predictions' (plural) and it contains a list
+                # The key from the predictor is 'predictions' (plural) and it contains a LIST.
+                # We get this list to iterate through it.
                 predictions_list = full_output_line.get('predictions', [])
 
                 for prediction in predictions_list:
-                    # The instance_id in the prediction corresponds to our cluster_id
+                    # The 'instance_id' in the prediction corresponds to our 'cluster_id'
                     cluster_id = prediction.get('instance_id')
                     
                     if not cluster_id:
@@ -130,7 +132,7 @@ def result_processor_cloud_function(event, context):
                     final_map_image = visualizer.generate_fire_map(
                         base_image_bytes=image_bytes, 
                         image_bbox=image_bbox, 
-                        ai_detections=[prediction],
+                        ai_detections=[prediction], # Pass the single prediction object for this cluster
                         firms_hotspots_df=firms_df,
                         acquisition_date_str=run_date
                     )
@@ -147,7 +149,7 @@ def result_processor_cloud_function(event, context):
                         "confidence": prediction.get("confidence", 0),
                         "encoded_png": encoded_image
                     })
-                # --- END OF BUG FIX ---
+                # --- END OF FIX ---
 
             except Exception as e:
                 logger.error(f"Failed to process a prediction line: '{line}'. Error: {e}", exc_info=True)
