@@ -1,4 +1,5 @@
 # Requirements for the Result Processor function
+folium
 google-cloud-storage
 Pillow
 pandas  

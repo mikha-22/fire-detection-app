@@ -14,8 +14,7 @@ GCS_IMAGE_OUTPUT_PREFIX = "raw_satellite_imagery/"
 SENTINEL2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
 LANDSAT8_COLLECTION = "LANDSAT/LC08/C02/T1_L2"
 LANDSAT9_COLLECTION = "LANDSAT/LC09/C02/T1_L2"
-# --- MODIFICATION: Increased cloud tolerance to the maximum practical level ---
-CLOUD_COVER_THRESHOLD = 95 # Increased from 80 to 95 for maximum resilience
+CLOUD_COVER_THRESHOLD = 95 
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -51,26 +50,17 @@ class SatelliteImageryAcquirer:
             raise RuntimeError(f"GEE initialization failed: {e}")
 
     def _harmonize_band_names(self, image):
-        """
-        A GEE server-side function to rename Landsat bands to match Sentinel-2
-        for easier processing.
-        """
         landsat_bands = ['SR_B4', 'SR_B3', 'SR_B2']
         sentinel_bands = ['B4', 'B3', 'B2']
         return image.select(landsat_bands).rename(sentinel_bands)
 
     def _get_latest_composite_image(self, bbox: List[float], date_start: str, date_end: str) -> Optional[ee.Image]:
-        """
-        Retrieves the single best (least cloudy) image from a merged collection
-        of Sentinel-2 and Landsat 8/9 imagery for a given bbox and date range.
-        """
         try:
             geometry = ee.Geometry.Rectangle(bbox)
 
             s2_collection = ee.ImageCollection(SENTINEL2_COLLECTION) \
                 .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_COVER_THRESHOLD))
             
-            # Landsat uses a 0-100 scale for cloud cover, so we don't multiply by 100
             l8_collection = ee.ImageCollection(LANDSAT8_COLLECTION) \
                 .filter(ee.Filter.lt('CLOUD_COVER', CLOUD_COVER_THRESHOLD)) \
                 .map(self._harmonize_band_names)
@@ -83,23 +73,19 @@ class SatelliteImageryAcquirer:
                 .filterDate(date_start, date_end) \
                 .filterBounds(geometry)
 
-            # Sort by cloud cover to get the best image first
-            best_image = merged_collection.sort('CLOUDY_PIXEL_PERCENTAGE', True).first() # Sort ascending is default
+            best_image = merged_collection.sort('CLOUDY_PIXEL_PERCENTAGE').first()
 
-            # A robust way to check if an image was found is to try to get its ID.
-            # This forces GEE to evaluate the .first() call.
             image_id = ee.String(best_image.id()).getInfo()
             if image_id is None:
-                _log_json("WARNING", "No images found in the merged collection for the given date range and location.",
-                          bbox=bbox, date_range=f"[{date_start}, {date_end})")
+                _log_json("WARNING", "No images found in the merged collection.", bbox=bbox, date_range=f"[{date_start}, {date_end})")
                 return None
             
-            # Get the cloud cover percentage for logging purposes
             cloud_cover = best_image.get('CLOUDY_PIXEL_PERCENTAGE').getInfo() or best_image.get('CLOUD_COVER').getInfo()
             _log_json("INFO", f"Found best available image ({image_id}) with approx {cloud_cover:.2f}% cloud cover.")
 
-            # Scale the image for export
-            rgb_image_scaled = best_image.select(['B4', 'B3', 'B2']).unitScale(0, 4000).multiply(255).toByte()
+            # --- MODIFICATION: Widen the scaling range for better visual representation ---
+            # This prevents clipping of bright clouds/smoke in the saved file.
+            rgb_image_scaled = best_image.select(['B4', 'B3', 'B2']).unitScale(0, 16000).multiply(255).toByte()
 
             return rgb_image_scaled
 
@@ -115,7 +101,7 @@ class SatelliteImageryAcquirer:
             try:
                 target_date_obj = datetime.strptime(acquisition_date, '%Y-%m-%d')
             except ValueError:
-                _log_json("ERROR", "Invalid acquisition_date format. Must be YYYY-MM-DD.", provided_date=acquisition_date)
+                _log_json("ERROR", "Invalid acquisition_date format.", provided_date=acquisition_date)
                 return {}
         else:
             target_date_obj = datetime.utcnow() - timedelta(days=1)
@@ -144,7 +130,7 @@ class SatelliteImageryAcquirer:
             image_to_export = self._get_latest_composite_image(region_bbox, date_start_str, date_end_str)
 
             if image_to_export is None:
-                _log_json("WARNING", f"Skipping export for region '{region_id}': no suitable image found in Sentinel/Landsat.", region_id=region_id)
+                _log_json("WARNING", f"Skipping export for region '{region_id}': no suitable image found.", region_id=region_id)
                 continue
 
             try:
@@ -170,7 +156,7 @@ class SatelliteImageryAcquirer:
                           region_id=region_id, error=str(e), error_type=type(e).__name__)
 
         if not exported_image_uris:
-            _log_json("WARNING", "No GEE export tasks were successfully initiated for any region.")
+            _log_json("WARNING", "No GEE export tasks were successfully initiated.")
         else:
             _log_json("INFO", "Satellite imagery acquisition process complete. Review GEE Task Manager for status.",
                       total_tasks_initiated=len(exported_image_uris),
