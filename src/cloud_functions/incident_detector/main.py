@@ -1,128 +1,192 @@
-# src/cloud_functions/incident_detector/main.py
+# src/cloud_functions/result_processor/main.py
 
 import os
 import json
+import base64
 import logging
+import time
+from io import BytesIO
 from datetime import datetime
 
 import pandas as pd
-import geopandas as gpd
-from sklearn.cluster import DBSCAN
-from google.cloud import pubsub, storage
-import numpy as np
-
-# --- FIX: Import both the class and the sensor list ---
-from src.firms_data_retriever.retriever import FirmsDataRetriever, FIRMS_SENSORS
+from google.cloud import storage, aiplatform
+from PIL import Image
+import folium
+from src.map_visualizer.visualizer import MapVisualizer
 
 # --- Configuration ---
+GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
-GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") 
-FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
-OUTPUT_TOPIC_NAME = "wildfire-cluster-detected"
-INCIDENTS_GCS_PREFIX = "incidents"
-DESIRED_EPS_KM = 10
-EARTH_RADIUS_KM = 6371
-DBSCAN_EPS_RADIANS = DESIRED_EPS_KM / EARTH_RADIUS_KM
-DBSCAN_MIN_SAMPLES = 3
-PEATLAND_SHP_PATH = "src/geodata/Indonesia_peat_lands.shp"
+GCP_REGION = os.environ.get("GCP_REGION")
+FINAL_OUTPUT_GCS_PREFIX = "final_outputs/"
+RETRY_ATTEMPTS = 10
+RETRY_DELAY_SECONDS = 60
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+# --- Initializations ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-def incident_detector_cloud_function(event, context):
-    logging.info("Incident Detector function triggered.")
+storage_client = storage.Client()
 
-    if not GCS_BUCKET_NAME:
-        logging.critical("GCS_BUCKET_NAME environment variable not set. Cannot proceed.")
+try:
+    aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
+    logger.info("Vertex AI client initialized.")
+except Exception as e:
+    logger.critical(f"Failed to initialize Vertex AI client. Error: {e}")
+
+def result_processor_cloud_function(event, context):
+    logger.info("Result Processor function triggered.")
+
+    if not all([GCS_BUCKET_NAME, GCP_PROJECT_ID, GCP_REGION]):
+        logger.critical("Missing required environment variables. Exiting.")
         return
 
-    run_date_str = datetime.utcnow().strftime('%Y-%m-%d')
-    logging.info(f"Processing for run_date: {run_date_str}")
+    run_date = datetime.utcnow().strftime('%Y-%m-%d')
+    logger.info(f"Processing results for run_date determined by system clock: {run_date}")
 
-    # --- FIX: Pass the imported FIRMS_SENSORS list to the constructor ---
-    firms_retriever = FirmsDataRetriever(
-        api_key=FIRMS_API_KEY, 
-        base_url="https://firms.modaps.eosdis.nasa.gov/api/area/csv/",
-        sensors=FIRMS_SENSORS
-    )
-    firms_df = firms_retriever.get_and_filter_firms_data([])
-
-    if firms_df.empty:
-        logging.warning("No FIRMS hotspots found globally. Exiting.")
-        return
-
-    gdf = gpd.GeoDataFrame(
-        firms_df, geometry=gpd.points_from_xy(firms_df.longitude, firms_df.latitude), crs="EPSG:4326"
-    )
-
-    try:
-        peatland_boundary = gpd.read_file(PEATLAND_SHP_PATH).to_crs(gdf.crs)
-    except Exception as e:
-        logging.error(f"CRITICAL: Could not load or reproject shapefile. Error: {e}", exc_info=True)
-        return
-
-    gdf_peatland_fires = gpd.sjoin(gdf, peatland_boundary, how="inner", predicate='within')
-
-    if gdf_peatland_fires.empty:
-        logging.info("No FIRMS hotspots found on Indonesian peatlands. Exiting.")
-        return
-
-    logging.info(f"Found {len(gdf_peatland_fires)} total fire points on Indonesian peatlands.")
-
-    coords_radians = np.radians(gdf_peatland_fires[['latitude', 'longitude']].values)
-    db = DBSCAN(eps=DBSCAN_EPS_RADIANS, min_samples=DBSCAN_MIN_SAMPLES, algorithm='ball_tree', metric='haversine').fit(coords_radians)
-
-    cluster_labels = db.labels_
-    n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
-    
-    if n_clusters == 0:
-        logging.warning("No clusters met the criteria. The pipeline will stop here.")
-        return
-        
-    logging.info(f"Found {n_clusters} significant fire clusters.")
-
-    gdf_peatland_fires['cluster_id'] = cluster_labels
-    clustered_fires = gdf_peatland_fires[gdf_peatland_fires['cluster_id'] != -1]
-    
-    all_incidents = []
-    for cluster_id_num in sorted(clustered_fires['cluster_id'].unique()):
-        cluster_gdf = clustered_fires[clustered_fires['cluster_id'] == cluster_id_num]
-        centroid = cluster_gdf.geometry.unary_union.centroid
-
-        incident_data = {
-            "cluster_id": f"fire_cluster_{run_date_str.replace('-', '')}_{cluster_id_num}",
-            "point_count": len(cluster_gdf),
-            "centroid_latitude": centroid.y,
-            "centroid_longitude": centroid.x,
-            "hotspots": json.loads(cluster_gdf.to_json())['features']
-        }
-        all_incidents.append(incident_data)
-
-    storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
-    output_blob_name = f"{INCIDENTS_GCS_PREFIX}/{run_date_str}/detected_incidents.jsonl"
-    
-    jsonl_content = "\n".join([json.dumps(incident) for incident in all_incidents])
-    
-    blob = bucket.blob(output_blob_name)
-    blob.upload_from_string(jsonl_content, content_type='application/jsonl')
-    logging.info(f"Successfully wrote {len(all_incidents)} incidents to gs://{GCS_BUCKET_NAME}/{output_blob_name}")
 
-    publisher = pubsub.PublisherClient()
-    topic_path = publisher.topic_path(GCP_PROJECT_ID, OUTPUT_TOPIC_NAME)
-    
-    notification_payload = {
-        "status": "incidents_detected",
-        "incident_count": len(all_incidents),
-        "completion_time": datetime.utcnow().isoformat() + "Z"
-    }
-    message_json = json.dumps(notification_payload)
-    message_bytes = message_json.encode('utf-8')
-
+    # --- Step 1: Load original incidents and batch inputs ---
     try:
-        publish_future = publisher.publish(topic_path, data=message_bytes)
-        publish_future.result()
-        logging.info(f"Successfully published completion signal for {run_date_str}.")
-    except Exception as e:
-        logging.error(f"Failed to publish notification message. Error: {e}")
+        incidents_blob_path = f"incidents/{run_date}/detected_incidents.jsonl"
+        logger.info(f"Attempting to download original incidents from: {incidents_blob_path}")
+        incidents_content = bucket.blob(incidents_blob_path).download_as_string().decode('utf-8')
+        incidents_data = [json.loads(line) for line in incidents_content.strip().split('\n')]
+        hotspots_by_cluster = {incident['cluster_id']: incident['hotspots'] for incident in incidents_data}
 
-    logging.info("Incident Detector function finished successfully.")
+        master_input_blob_path = f"incident_inputs/{run_date}.jsonl"
+        logger.info(f"Attempting to download batch inputs from: {master_input_blob_path}")
+        input_content = bucket.blob(master_input_blob_path).download_as_string().decode('utf-8')
+        
+        input_metadata = {}
+        for line in input_content.strip().split('\n'):
+            instance = json.loads(line)
+            for cluster in instance.get('clusters', []):
+                input_metadata[cluster['cluster_id']] = cluster
+                
+    except Exception as e:
+        logger.error(f"CRITICAL: Failed to load prerequisite data (incidents or inputs). Error: {e}", exc_info=True)
+        return
+
+    # --- Step 2: Find and load AI prediction results with retries ---
+    gcs_output_prefix = f"incident_outputs/{run_date}/"
+    prediction_blobs = []
+    for attempt in range(RETRY_ATTEMPTS):
+        logger.info(f"Checking for prediction files in '{gcs_output_prefix}'... (Attempt {attempt + 1}/{RETRY_ATTEMPTS})")
+        prediction_blobs = [b for b in bucket.list_blobs(prefix=gcs_output_prefix) if 'prediction.results' in b.name]
+        if prediction_blobs:
+            logger.info(f"Found {len(prediction_blobs)} prediction result file(s).")
+            break
+        if attempt < RETRY_ATTEMPTS - 1:
+            logger.warning(f"No prediction files found. Retrying in {RETRY_DELAY_SECONDS} seconds.")
+            time.sleep(RETRY_DELAY_SECONDS)
+
+    if not prediction_blobs:
+        logger.error(f"No prediction result files found at prefix: {gcs_output_prefix} after {RETRY_ATTEMPTS} attempts. Exiting.")
+        return
+
+    # --- Step 3: Process results and generate visualizations ---
+    folium_map_data = []
+    for prediction_blob in prediction_blobs:
+        logger.info(f"Processing results file: {prediction_blob.name}")
+        prediction_content_str = prediction_blob.download_as_string().decode('utf-8')
+        
+        for line in prediction_content_str.strip().split('\n'):
+            if not line.strip(): continue
+
+            try:
+                # --- BUG FIX: Correctly loop through the list of predictions ---
+                full_output_line = json.loads(line)
+                
+                # The key from Vertex AI is 'predictions' (plural) and it contains a list
+                predictions_list = full_output_line.get('predictions', [])
+
+                for prediction in predictions_list:
+                    # The instance_id in the prediction corresponds to our cluster_id
+                    cluster_id = prediction.get('instance_id')
+                    
+                    if not cluster_id:
+                        logger.warning(f"Skipping a prediction because it was missing an 'instance_id': {prediction}")
+                        continue
+                        
+                    input_data = input_metadata.get(cluster_id)
+                    if not input_data:
+                        logger.warning(f"Could not find matching input metadata for cluster_id '{cluster_id}'. Skipping.")
+                        continue
+
+                    original_image_uri = input_data['gcs_image_uri']
+                    image_bbox = input_data['image_bbox']
+                    
+                    img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
+                    image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
+
+                    cluster_hotspots = hotspots_by_cluster.get(cluster_id, [])
+                    firms_df = pd.DataFrame()
+                    if cluster_hotspots:
+                        hotspot_records = [h['properties'] for h in cluster_hotspots]
+                        firms_df = pd.DataFrame.from_records(hotspot_records)
+                    
+                    visualizer = MapVisualizer()
+                    final_map_image = visualizer.generate_fire_map(
+                        base_image_bytes=image_bytes, 
+                        image_bbox=image_bbox, 
+                        ai_detections=[prediction],
+                        firms_hotspots_df=firms_df,
+                        acquisition_date_str=run_date
+                    )
+                    
+                    img_byte_arr = BytesIO()
+                    final_map_image.save(img_byte_arr, format='PNG')
+                    encoded_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+
+                    folium_map_data.append({
+                        "cluster_id": cluster_id,
+                        "latitude": (image_bbox[1] + image_bbox[3]) / 2,
+                        "longitude": (image_bbox[0] + image_bbox[2]) / 2,
+                        "detected": prediction.get("detected"),
+                        "confidence": prediction.get("confidence", 0),
+                        "encoded_png": encoded_image
+                    })
+                # --- END OF BUG FIX ---
+
+            except Exception as e:
+                logger.error(f"Failed to process a prediction line: '{line}'. Error: {e}", exc_info=True)
+
+    # --- Step 4: Generate Final Interactive Report ---
+    if folium_map_data:
+        logger.info(f"Generating final interactive report for {len(folium_map_data)} clusters.")
+        m = folium.Map(location=[-2.5, 118], zoom_start=5)
+
+        for item in folium_map_data:
+            image_uri = f"data:image/png;base64,{item['encoded_png']}"
+            popup_html = f"""
+            <h4>Cluster ID: {item['cluster_id']}</h4>
+            <p>
+              <b>AI Detection:</b> {'FIRE DETECTED' if item['detected'] else 'No Fire Detected'}<br>
+              <b>Confidence:</b> {item['confidence']:.2%}
+            </p>
+            <img src='{image_uri}' width='400'>
+            """
+            iframe = folium.IFrame(popup_html, width=430, height=450)
+            popup = folium.Popup(iframe, max_width=430)
+            marker_color = 'red' if item['detected'] else 'green'
+            
+            folium.Marker(
+                location=[item['latitude'], item['longitude']],
+                popup=popup,
+                tooltip=item['cluster_id'],
+                icon=folium.Icon(color=marker_color, icon='fire', prefix='fa')
+            ).add_to(m)
+
+        report_filename = f"daily_interactive_report_{run_date}.html"
+        local_temp_path = f"/tmp/{report_filename}"
+        m.save(local_temp_path)
+        
+        report_blob_path = f"{FINAL_OUTPUT_GCS_PREFIX}{run_date}/{report_filename}"
+        bucket.blob(report_blob_path).upload_from_filename(local_temp_path, content_type='text/html')
+        
+        logger.info(f"Successfully generated and uploaded interactive report to: gs://{GCS_BUCKET_NAME}/{report_blob_path}")
+    else:
+        logger.error(f"No data was successfully processed to generate a Folium map. This is likely due to parsing errors on the prediction files.")
+
+    logger.info("Result Processor function finished successfully.")
