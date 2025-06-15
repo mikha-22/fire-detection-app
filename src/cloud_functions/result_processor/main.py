@@ -23,127 +23,90 @@ RETRY_ATTEMPTS = 10
 RETRY_DELAY_SECONDS = 60
 
 # --- Initializations ---
-# Added more detailed logging for clarity
-log_format = '%(asctime)s - %(levelname)s - [%(component)s] - %(message)s'
-logging.basicConfig(level=logging.INFO, format=log_format)
+# Using a standard logger format
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 storage_client = storage.Client()
 
 try:
     aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
-    logger.info("Vertex AI client initialized.", extra={'component': 'ResultProcessorInit'})
+    logger.info("Vertex AI client initialized.")
 except Exception as e:
-    logger.critical(f"Failed to initialize Vertex AI client. Error: {e}", extra={'component': 'ResultProcessorInit'})
-
-def log_with_component(message, severity="INFO", **kwargs):
-    """Helper function for structured logging."""
-    extra_info = {'component': 'ResultProcessor', **kwargs}
-    if severity.upper() == "INFO":
-        logger.info(message, extra=extra_info)
-    elif severity.upper() == "ERROR":
-        logger.error(message, extra=extra_info)
-    elif severity.upper() == "WARNING":
-        logger.warning(message, extra=extra_info)
-    else:
-        logger.debug(message, extra=extra_info)
+    logger.critical(f"Failed to initialize Vertex AI client. Error: {e}")
 
 def result_processor_cloud_function(event, context):
-    trigger_event_id = context.event_id
-    log_with_component("Result Processor function triggered.", trigger_event_id=trigger_event_id)
+    logger.info("Result Processor function triggered.")
 
     if not all([GCS_BUCKET_NAME, GCP_PROJECT_ID, GCP_REGION]):
-        log_with_component("Missing required environment variables. Exiting.", "CRITICAL")
+        logger.critical("Missing required environment variables. Exiting.")
         return
 
     run_date = datetime.utcnow().strftime('%Y-%m-%d')
-    log_with_component(
-        "Processing results based on current system date.",
-        run_date=run_date,
-        execution_id=trigger_event_id
-    )
+    logger.info(f"Processing results for run_date determined by system clock: {run_date}")
 
-    # --- Step 1: Load Original Incident Data ---
-    log_with_component("Starting Step 1: Loading Original Incident Data.", execution_id=trigger_event_id)
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
-    incidents_blob_path = f"incidents/{run_date}/detected_incidents.jsonl"
-    log_with_component("Attempting to download file from GCS.", gcs_path=f"gs://{GCS_BUCKET_NAME}/{incidents_blob_path}")
-    try:
-        incidents_content = bucket.blob(incidents_blob_path).download_as_string()
-        log_with_component("File download successful.", gcs_path=f"gs://{GCS_BUCKET_NAME}/{incidents_blob_path}", bytes_downloaded=len(incidents_content))
-        incidents_data = [json.loads(line) for line in incidents_content.decode('utf-8').strip().split('\n')]
-        hotspots_by_cluster = {incident['cluster_id']: incident['hotspots'] for incident in incidents_data}
-        log_with_component("Step 1 Complete: Loaded original incidents.", incident_count=len(incidents_data), execution_id=trigger_event_id)
-    except Exception as e:
-        log_with_component(f"Could not read or parse the original incidents file: {incidents_blob_path}. Error: {e}", "ERROR", exc_info=True)
-        hotspots_by_cluster = {}
 
-    # --- Step 2: Load Batch Prediction Input Data ---
-    log_with_component("Starting Step 2: Loading Batch Prediction Input Data.", execution_id=trigger_event_id)
-    master_input_blob_path = f"incident_inputs/{run_date}.jsonl"
-    log_with_component("Attempting to download file from GCS.", gcs_path=f"gs://{GCS_BUCKET_NAME}/{master_input_blob_path}")
+    # --- Step 1: Load original incidents and batch inputs ---
     try:
-        input_instance_str = bucket.blob(master_input_blob_path).download_as_string()
-        log_with_component("File download successful.", gcs_path=f"gs://{GCS_BUCKET_NAME}/{master_input_blob_path}", bytes_downloaded=len(input_instance_str))
+        incidents_blob_path = f"incidents/{run_date}/detected_incidents.jsonl"
+        logger.info(f"Attempting to download original incidents from: {incidents_blob_path}")
+        incidents_content = bucket.blob(incidents_blob_path).download_as_string().decode('utf-8')
+        incidents_data = [json.loads(line) for line in incidents_content.strip().split('\n')]
+        hotspots_by_cluster = {incident['cluster_id']: incident['hotspots'] for incident in incidents_data}
+
+        master_input_blob_path = f"incident_inputs/{run_date}.jsonl"
+        logger.info(f"Attempting to download batch inputs from: {master_input_blob_path}")
+        input_instance_str = bucket.blob(master_input_blob_path).download_as_string().decode('utf-8')
         input_instance = json.loads(input_instance_str)
         input_metadata = {cluster['cluster_id']: cluster for cluster in input_instance['clusters']}
-        log_with_component("Step 2 Complete: Loaded batch prediction inputs.", input_count=len(input_metadata), execution_id=trigger_event_id)
     except Exception as e:
-        log_with_component(f"CRITICAL: Could not read or parse the master input file: {master_input_blob_path}. Cannot proceed. Error: {e}", "ERROR", exc_info=True)
+        logger.error(f"CRITICAL: Failed to load prerequisite data (incidents or inputs). Error: {e}", exc_info=True)
         return
 
-    # --- Step 3: Find and Load AI Prediction Results ---
-    log_with_component("Starting Step 3: Loading AI Prediction Results.", execution_id=trigger_event_id)
+    # --- Step 2: Find and load AI prediction results with retries ---
     gcs_output_prefix = f"incident_outputs/{run_date}/"
     prediction_blobs = []
     for attempt in range(RETRY_ATTEMPTS):
-        log_with_component(f"Checking for prediction files in '{gcs_output_prefix}'... (Attempt {attempt + 1}/{RETRY_ATTEMPTS})")
-        prediction_blobs = list(bucket.list_blobs(prefix=gcs_output_prefix))
+        logger.info(f"Checking for prediction files in '{gcs_output_prefix}'... (Attempt {attempt + 1}/{RETRY_ATTEMPTS})")
+        # Filter for the actual results file to avoid processing empty directories
+        prediction_blobs = [b for b in bucket.list_blobs(prefix=gcs_output_prefix) if 'prediction.results' in b.name]
         if prediction_blobs:
-            log_with_component(f"Found {len(prediction_blobs)} blob(s) in prefix.")
+            logger.info(f"Found {len(prediction_blobs)} prediction result file(s).")
             break
         if attempt < RETRY_ATTEMPTS - 1:
-            log_with_component(f"No prediction files found. Retrying in {RETRY_DELAY_SECONDS} seconds.", "WARNING")
+            logger.warning(f"No prediction files found. Retrying in {RETRY_DELAY_SECONDS} seconds.")
             time.sleep(RETRY_DELAY_SECONDS)
 
     if not prediction_blobs:
-        log_with_component(f"No prediction result files found at prefix: {gcs_output_prefix} after {RETRY_ATTEMPTS} attempts. Exiting.", "ERROR")
+        logger.error(f"No prediction result files found at prefix: {gcs_output_prefix} after {RETRY_ATTEMPTS} attempts. Exiting.")
         return
 
-    # --- Step 4: Process Results and Generate Visualizations ---
-    log_with_component("Starting Step 4: Processing results and generating maps.", execution_id=trigger_event_id)
+    # --- Step 3: Process results and generate visualizations ---
     folium_map_data = []
     for prediction_blob in prediction_blobs:
-        if 'prediction.results' not in prediction_blob.name:
-            continue
-        
-        log_with_component("Processing prediction result file.", gcs_path=f"gs://{GCS_BUCKET_NAME}/{prediction_blob.name}")
+        logger.info(f"Processing results file: {prediction_blob.name}")
         prediction_content_str = prediction_blob.download_as_string().decode('utf-8')
         
         for line in prediction_content_str.strip().split('\n'):
             if not line.strip(): continue
 
             try:
-                # --- THE FINAL FIX IS HERE ---
-                # Vertex AI wraps the model's output in a standard format.
-                # We need to parse this wrapper to get to our predictions list.
+                # --- THIS IS THE FINAL FIX ---
+                # Vertex AI wraps our model's output. We need to parse that wrapper.
                 full_output_line = json.loads(line)
                 prediction_wrapper = full_output_line.get('prediction', {})
                 ai_detections_list = prediction_wrapper.get('predictions')
                 
                 if not ai_detections_list:
-                    log_with_component("Skipping line, no 'predictions' key found inside the 'prediction' wrapper.", "WARNING", line_content=line)
+                    logger.warning(f"Skipping line, no 'predictions' key found inside the 'prediction' wrapper: {line}")
                     continue
 
                 for prediction in ai_detections_list:
                     cluster_id = prediction.get("instance_id")
-                    if not cluster_id:
-                        log_with_component("Skipping prediction with no instance_id.", "WARNING", prediction_data=prediction)
-                        continue
-                    
                     input_data = input_metadata.get(cluster_id)
                     if not input_data:
-                        log_with_component(f"Could not find input metadata for cluster_id '{cluster_id}'", "ERROR")
+                        logger.error(f"Could not find input metadata for cluster_id '{cluster_id}'")
                         continue
 
                     original_image_uri = input_data['gcs_image_uri']
@@ -181,11 +144,11 @@ def result_processor_cloud_function(event, context):
                     })
 
             except Exception as e:
-                log_with_component(f"Failed to process a prediction line: '{line}'. Error: {e}", "ERROR", exc_info=True)
+                logger.error(f"Failed to process a prediction line: '{line}'. Error: {e}", exc_info=True)
 
-    # --- Step 5: Generate Final Interactive Report ---
+    # --- Step 4: Generate Final Interactive Report ---
     if folium_map_data:
-        log_with_component(f"Starting Step 5: Generating final interactive report for {len(folium_map_data)} clusters.", execution_id=trigger_event_id)
+        logger.info(f"Generating final interactive report for {len(folium_map_data)} clusters.")
         m = folium.Map(location=[-2.5, 118], zoom_start=5)
 
         for item in folium_map_data:
@@ -216,8 +179,8 @@ def result_processor_cloud_function(event, context):
         report_blob_path = f"{FINAL_OUTPUT_GCS_PREFIX}{run_date}/{report_filename}"
         bucket.blob(report_blob_path).upload_from_filename(local_temp_path, content_type='text/html')
         
-        log_with_component(f"Successfully generated and uploaded interactive report to: gs://{GCS_BUCKET_NAME}/{report_blob_path}")
+        logger.info(f"Successfully generated and uploaded interactive report to: gs://{GCS_BUCKET_NAME}/{report_blob_path}")
     else:
-        log_with_component("No data was processed to generate a Folium map. This could be because the prediction files were empty or could not be parsed.", "ERROR", search_prefix=gcs_output_prefix, execution_id=trigger_event_id)
+        logger.error(f"No data was successfully processed to generate a Folium map. This is likely due to parsing errors on the prediction files.")
 
-    log_with_component("Result Processor function finished successfully.", execution_id=trigger_event_id)
+    logger.info("Result Processor function finished successfully.")
