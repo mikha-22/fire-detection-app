@@ -11,7 +11,7 @@ from sklearn.cluster import DBSCAN
 from google.cloud import pubsub, storage
 import numpy as np
 
-# --- FIX: Import both the class and the sensor list ---
+# Import both the class and the sensor list
 from src.firms_data_retriever.retriever import FirmsDataRetriever, FIRMS_SENSORS
 
 # --- Configuration ---
@@ -38,7 +38,7 @@ def incident_detector_cloud_function(event, context):
     run_date_str = datetime.utcnow().strftime('%Y-%m-%d')
     logging.info(f"Processing for run_date: {run_date_str}")
 
-    # --- FIX: Pass the imported FIRMS_SENSORS list to the constructor ---
+    # Pass the imported FIRMS_SENSORS list to the constructor
     firms_retriever = FirmsDataRetriever(
         api_key=FIRMS_API_KEY, 
         base_url="https://firms.modaps.eosdis.nasa.gov/api/area/csv/",
@@ -80,29 +80,6 @@ def incident_detector_cloud_function(event, context):
         
     logging.info(f"Found {n_clusters} significant fire clusters.")
 
-<<<<<<< HEAD
-            try:
-                # --- BUG FIX & SOLUTION ---
-                # The line from Vertex AI contains a JSON object.
-                full_output_line = json.loads(line)
-                
-                # The key from the predictor is 'predictions' (plural) and it contains a LIST.
-                # We get this list to iterate through it.
-                predictions_list = full_output_line.get('predictions', [])
-
-                for prediction in predictions_list:
-                    # The 'instance_id' in the prediction corresponds to our 'cluster_id'
-                    cluster_id = prediction.get('instance_id')
-                    
-                    if not cluster_id:
-                        logger.warning(f"Skipping a prediction because it was missing an 'instance_id': {prediction}")
-                        continue
-                        
-                    input_data = input_metadata.get(cluster_id)
-                    if not input_data:
-                        logger.warning(f"Could not find matching input metadata for cluster_id '{cluster_id}'. Skipping.")
-                        continue
-=======
     gdf_peatland_fires['cluster_id'] = cluster_labels
     clustered_fires = gdf_peatland_fires[gdf_peatland_fires['cluster_id'] != -1]
     
@@ -119,7 +96,6 @@ def incident_detector_cloud_function(event, context):
             "hotspots": json.loads(cluster_gdf.to_json())['features']
         }
         all_incidents.append(incident_data)
->>>>>>> parent of a4caff3 (.)
 
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
@@ -131,36 +107,6 @@ def incident_detector_cloud_function(event, context):
     blob.upload_from_string(jsonl_content, content_type='application/jsonl')
     logging.info(f"Successfully wrote {len(all_incidents)} incidents to gs://{GCS_BUCKET_NAME}/{output_blob_name}")
 
-<<<<<<< HEAD
-                    cluster_hotspots = hotspots_by_cluster.get(cluster_id, [])
-                    firms_df = pd.DataFrame()
-                    if cluster_hotspots:
-                        hotspot_records = [h['properties'] for h in cluster_hotspots]
-                        firms_df = pd.DataFrame.from_records(hotspot_records)
-                    
-                    visualizer = MapVisualizer()
-                    final_map_image = visualizer.generate_fire_map(
-                        base_image_bytes=image_bytes, 
-                        image_bbox=image_bbox, 
-                        ai_detections=[prediction], # Pass the single prediction object for this cluster
-                        firms_hotspots_df=firms_df,
-                        acquisition_date_str=run_date
-                    )
-                    
-                    img_byte_arr = BytesIO()
-                    final_map_image.save(img_byte_arr, format='PNG')
-                    encoded_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
-
-                    folium_map_data.append({
-                        "cluster_id": cluster_id,
-                        "latitude": (image_bbox[1] + image_bbox[3]) / 2,
-                        "longitude": (image_bbox[0] + image_bbox[2]) / 2,
-                        "detected": prediction.get("detected"),
-                        "confidence": prediction.get("confidence", 0),
-                        "encoded_png": encoded_image
-                    })
-                # --- END OF FIX ---
-=======
     publisher = pubsub.PublisherClient()
     topic_path = publisher.topic_path(GCP_PROJECT_ID, OUTPUT_TOPIC_NAME)
     
@@ -178,6 +124,5 @@ def incident_detector_cloud_function(event, context):
         logging.info(f"Successfully published completion signal for {run_date_str}.")
     except Exception as e:
         logging.error(f"Failed to publish notification message. Error: {e}")
->>>>>>> parent of a4caff3 (.)
 
     logging.info("Incident Detector function finished successfully.")

@@ -95,61 +95,63 @@ def result_processor_cloud_function(event, context):
             if not line.strip(): continue
 
             try:
+                # The line from Vertex AI contains a JSON object.
                 full_output_line = json.loads(line)
-                prediction = full_output_line.get('prediction', {})
-                instance_data = full_output_line.get('instance', {})
-                clusters_in_instance = instance_data.get('clusters', [])
                 
-                if not clusters_in_instance:
-                    logger.warning(f"No clusters found in instance: {instance_data}")
-                    continue
-                
-                cluster_data = clusters_in_instance[0]
-                cluster_id = cluster_data.get('cluster_id')
-                
-                if not cluster_id:
-                    logger.warning(f"No cluster_id found in cluster data: {cluster_data}")
-                    continue
+                # --- BUG FIX & SOLUTION ---
+                # The prediction from our model is nested. We need to parse it correctly.
+                # The key from the predictor is 'predictions' (plural) and it contains a LIST.
+                prediction_wrapper = full_output_line.get('prediction', {})
+                predictions_list = prediction_wrapper.get('predictions', [])
+
+                # Process each prediction in the list (usually just one per line)
+                for prediction in predictions_list:
+                    # The 'instance_id' in the prediction corresponds to our 'cluster_id'
+                    cluster_id = prediction.get('instance_id')
                     
-                # --- AGREED FIX: Add robustness check for input metadata ---
-                input_data = input_metadata.get(cluster_id)
-                if not input_data:
-                    logger.warning(f"Could not find matching input metadata for cluster_id '{cluster_id}'. Skipping.")
-                    continue
+                    if not cluster_id:
+                        logger.warning(f"Skipping a prediction because it was missing an 'instance_id': {prediction}")
+                        continue
+                        
+                    input_data = input_metadata.get(cluster_id)
+                    if not input_data:
+                        logger.warning(f"Could not find matching input metadata for cluster_id '{cluster_id}'. Skipping.")
+                        continue
 
-                original_image_uri = input_data['gcs_image_uri']
-                image_bbox = input_data['image_bbox']
-                
-                img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
-                image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
+                    original_image_uri = input_data['gcs_image_uri']
+                    image_bbox = input_data['image_bbox']
+                    
+                    img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
+                    image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
 
-                cluster_hotspots = hotspots_by_cluster.get(cluster_id, [])
-                firms_df = pd.DataFrame()
-                if cluster_hotspots:
-                    hotspot_records = [h['properties'] for h in cluster_hotspots]
-                    firms_df = pd.DataFrame.from_records(hotspot_records)
-                
-                visualizer = MapVisualizer()
-                final_map_image = visualizer.generate_fire_map(
-                    base_image_bytes=image_bytes, 
-                    image_bbox=image_bbox, 
-                    ai_detections=[prediction],
-                    firms_hotspots_df=firms_df,
-                    acquisition_date_str=run_date
-                )
-                
-                img_byte_arr = BytesIO()
-                final_map_image.save(img_byte_arr, format='PNG')
-                encoded_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+                    cluster_hotspots = hotspots_by_cluster.get(cluster_id, [])
+                    firms_df = pd.DataFrame()
+                    if cluster_hotspots:
+                        hotspot_records = [h['properties'] for h in cluster_hotspots]
+                        firms_df = pd.DataFrame.from_records(hotspot_records)
+                    
+                    visualizer = MapVisualizer()
+                    final_map_image = visualizer.generate_fire_map(
+                        base_image_bytes=image_bytes, 
+                        image_bbox=image_bbox, 
+                        ai_detections=[prediction], # Pass the single prediction object for this cluster
+                        firms_hotspots_df=firms_df,
+                        acquisition_date_str=run_date
+                    )
+                    
+                    img_byte_arr = BytesIO()
+                    final_map_image.save(img_byte_arr, format='PNG')
+                    encoded_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
-                folium_map_data.append({
-                    "cluster_id": cluster_id,
-                    "latitude": (image_bbox[1] + image_bbox[3]) / 2,
-                    "longitude": (image_bbox[0] + image_bbox[2]) / 2,
-                    "detected": prediction.get("detected"),
-                    "confidence": prediction.get("confidence", 0),
-                    "encoded_png": encoded_image
-                })
+                    folium_map_data.append({
+                        "cluster_id": cluster_id,
+                        "latitude": (image_bbox[1] + image_bbox[3]) / 2,
+                        "longitude": (image_bbox[0] + image_bbox[2]) / 2,
+                        "detected": prediction.get("detected"),
+                        "confidence": prediction.get("confidence", 0),
+                        "encoded_png": encoded_image
+                    })
+                # --- END OF FIX ---
 
             except Exception as e:
                 logger.error(f"Failed to process a prediction line: '{line}'. Error: {e}", exc_info=True)
