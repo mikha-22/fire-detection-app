@@ -11,18 +11,18 @@ from sklearn.cluster import DBSCAN
 from google.cloud import pubsub, storage
 import numpy as np
 
+# --- CORRECTED: No longer need to import FIRMS_SENSORS here, the class handles it ---
 from src.firms_data_retriever.retriever import FirmsDataRetriever
 
 # --- Configuration ---
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
-GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") # Added GCS Bucket
+GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME")
 FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
 OUTPUT_TOPIC_NAME = "wildfire-cluster-detected"
-INCIDENTS_GCS_PREFIX = "incidents" # New GCS prefix for outputs
+INCIDENTS_GCS_PREFIX = "incidents"
 DESIRED_EPS_KM = 10
 EARTH_RADIUS_KM = 6371
 DBSCAN_EPS_RADIANS = DESIRED_EPS_KM / EARTH_RADIUS_KM
-# --- AGREED FIX: Changed minimum samples from 2 to 3 ---
 DBSCAN_MIN_SAMPLES = 3
 PEATLAND_SHP_PATH = "src/geodata/Indonesia_peat_lands.shp"
 
@@ -35,11 +35,14 @@ def incident_detector_cloud_function(event, context):
         logging.critical("GCS_BUCKET_NAME environment variable not set. Cannot proceed.")
         return
 
-    # This function, as the first in the chain, establishes the date for its own outputs.
     run_date_str = datetime.utcnow().strftime('%Y-%m-%d')
     logging.info(f"Processing for run_date: {run_date_str}")
 
-    firms_retriever = FirmsDataRetriever(api_key=FIRMS_API_KEY, base_url="https://firms.modaps.eosdis.nasa.gov/api/area/csv/", sensors=["VIIRS_SNPP_NRT"])
+    # --- THE FIX: Removed the hardcoded 'sensors' argument ---
+    # The FirmsDataRetriever will now correctly use the default list of 3 sensors
+    # defined in retriever.py.
+    firms_retriever = FirmsDataRetriever(api_key=FIRMS_API_KEY, base_url="https://firms.modaps.eosdis.nasa.gov/api/area/csv/")
+    
     firms_df = firms_retriever.get_and_filter_firms_data([])
 
     if firms_df.empty:
