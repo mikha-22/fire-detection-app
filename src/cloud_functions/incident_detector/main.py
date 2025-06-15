@@ -22,7 +22,8 @@ INCIDENTS_GCS_PREFIX = "incidents" # New GCS prefix for outputs
 DESIRED_EPS_KM = 10
 EARTH_RADIUS_KM = 6371
 DBSCAN_EPS_RADIANS = DESIRED_EPS_KM / EARTH_RADIUS_KM
-DBSCAN_MIN_SAMPLES = 2
+# --- AGREED FIX: Changed minimum samples from 2 to 3 ---
+DBSCAN_MIN_SAMPLES = 3
 PEATLAND_SHP_PATH = "src/geodata/Indonesia_peat_lands.shp"
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -102,11 +103,9 @@ def incident_detector_cloud_function(event, context):
     blob.upload_from_string(jsonl_content, content_type='application/jsonl')
     logging.info(f"Successfully wrote {len(all_incidents)} incidents to gs://{GCS_BUCKET_NAME}/{output_blob_name}")
 
-    # --- MODIFIED: Publish a lightweight notification message WITHOUT the date ---
     publisher = pubsub.PublisherClient()
     topic_path = publisher.topic_path(GCP_PROJECT_ID, OUTPUT_TOPIC_NAME)
     
-    # The payload is now a simple signal, as the downstream function will get its own date.
     notification_payload = {
         "status": "incidents_detected",
         "incident_count": len(all_incidents),

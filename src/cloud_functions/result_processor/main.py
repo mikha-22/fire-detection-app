@@ -23,7 +23,6 @@ RETRY_ATTEMPTS = 10
 RETRY_DELAY_SECONDS = 60
 
 # --- Initializations ---
-# Using a standard logger format
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -59,7 +58,6 @@ def result_processor_cloud_function(event, context):
         logger.info(f"Attempting to download batch inputs from: {master_input_blob_path}")
         input_content = bucket.blob(master_input_blob_path).download_as_string().decode('utf-8')
         
-        # Parse all input instances to build metadata
         input_metadata = {}
         for line in input_content.strip().split('\n'):
             instance = json.loads(line)
@@ -75,7 +73,6 @@ def result_processor_cloud_function(event, context):
     prediction_blobs = []
     for attempt in range(RETRY_ATTEMPTS):
         logger.info(f"Checking for prediction files in '{gcs_output_prefix}'... (Attempt {attempt + 1}/{RETRY_ATTEMPTS})")
-        # Filter for the actual results file to avoid processing empty directories
         prediction_blobs = [b for b in bucket.list_blobs(prefix=gcs_output_prefix) if 'prediction.results' in b.name]
         if prediction_blobs:
             logger.info(f"Found {len(prediction_blobs)} prediction result file(s).")
@@ -98,13 +95,8 @@ def result_processor_cloud_function(event, context):
             if not line.strip(): continue
 
             try:
-                # Parse the Vertex AI output
                 full_output_line = json.loads(line)
-                
-                # Extract the prediction data - it's directly in the 'prediction' field
                 prediction = full_output_line.get('prediction', {})
-                
-                # With one-per-instance, we need to get the cluster from the instance
                 instance_data = full_output_line.get('instance', {})
                 clusters_in_instance = instance_data.get('clusters', [])
                 
@@ -112,7 +104,6 @@ def result_processor_cloud_function(event, context):
                     logger.warning(f"No clusters found in instance: {instance_data}")
                     continue
                 
-                # Get the first (and only) cluster from this instance
                 cluster_data = clusters_in_instance[0]
                 cluster_id = cluster_data.get('cluster_id')
                 
@@ -120,10 +111,11 @@ def result_processor_cloud_function(event, context):
                     logger.warning(f"No cluster_id found in cluster data: {cluster_data}")
                     continue
                     
+                # --- AGREED FIX: Add robustness check for input metadata ---
                 input_data = input_metadata.get(cluster_id)
                 if not input_data:
-                    # For one-per-instance, the cluster data is in the prediction itself
-                    input_data = cluster_data
+                    logger.warning(f"Could not find matching input metadata for cluster_id '{cluster_id}'. Skipping.")
+                    continue
 
                 original_image_uri = input_data['gcs_image_uri']
                 image_bbox = input_data['image_bbox']
@@ -141,7 +133,7 @@ def result_processor_cloud_function(event, context):
                 final_map_image = visualizer.generate_fire_map(
                     base_image_bytes=image_bytes, 
                     image_bbox=image_bbox, 
-                    ai_detections=[prediction],  # Pass the prediction as a single-item list
+                    ai_detections=[prediction],
                     firms_hotspots_df=firms_df,
                     acquisition_date_str=run_date
                 )
@@ -197,6 +189,6 @@ def result_processor_cloud_function(event, context):
         
         logger.info(f"Successfully generated and uploaded interactive report to: gs://{GCS_BUCKET_NAME}/{report_blob_path}")
     else:
-        logger.error(f"No data was successfully processed to generate a Folium map. This is likely due to parsing errors on the prediction files.")
+        logger.error(f"No data was successfully processed to generate a Folium map.")
 
     logger.info("Result Processor function finished successfully.")
