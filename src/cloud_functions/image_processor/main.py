@@ -4,6 +4,7 @@ import os
 import json
 import base64
 import logging
+from datetime import datetime
 
 from google.cloud import aiplatform, storage
 from src.satellite_imagery_acquirer.acquirer import SatelliteImageryAcquirer
@@ -22,22 +23,13 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 def image_processor_cloud_function(event, context):
     logging.info("Image Processor function triggered.")
 
-    if 'data' not in event:
-        logging.error("No data found in the trigger event.")
-        return
+    # --- MODIFIED: The function now determines its own execution date. ---
+    # It no longer relies on the Pub/Sub message for the date.
+    # This assumes the function runs on the same UTC day as the incident_detector.
+    run_date = datetime.utcnow().strftime('%Y-%m-%d')
+    logging.info(f"Processing for run_date determined by system clock: {run_date}.")
 
-    # --- MODIFIED: Decode the lightweight notification message ---
-    message_data = base64.b64decode(event['data']).decode('utf-8')
-    notification_data = json.loads(message_data)
-    run_date = notification_data.get("run_date")
-
-    if not run_date:
-        logging.error("Received notification with no 'run_date'. Exiting.")
-        return
-
-    logging.info(f"Processing incidents for run_date: {run_date}.")
-
-    # --- MODIFIED: Read the incidents from the GCS file ---
+    # --- Read the incidents from the GCS file based on the determined date ---
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     incidents_blob_name = f"{INCIDENTS_GCS_PREFIX}/{run_date}/detected_incidents.jsonl"
@@ -45,16 +37,16 @@ def image_processor_cloud_function(event, context):
     try:
         incidents_content = bucket.blob(incidents_blob_name).download_as_string().decode('utf-8')
         incidents = [json.loads(line) for line in incidents_content.strip().split('\n')]
-        logging.info(f"Successfully loaded {len(incidents)} incidents from GCS.")
+        logging.info(f"Successfully loaded {len(incidents)} incidents from GCS for date {run_date}.")
     except Exception as e:
-        logging.error(f"Failed to read or parse incidents file from GCS: gs://{GCS_BUCKET_NAME}/{incidents_blob_name}. Error: {e}")
+        # This will fail if this function runs on a different UTC day than the previous one.
+        logging.error(f"Failed to read incidents file from GCS: gs://{GCS_BUCKET_NAME}/{incidents_blob_name}. Error: {e}")
         return
 
     if not incidents:
         logging.warning("Incidents file was empty or could not be parsed. Exiting.")
         return
 
-    # The rest of the logic remains the same, as it's already date-based.
     regions_to_acquire = []
     for incident in incidents:
         cluster_id = incident.get("cluster_id")

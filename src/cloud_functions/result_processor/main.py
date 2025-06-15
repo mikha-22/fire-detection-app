@@ -6,6 +6,7 @@ import base64
 import logging
 import time
 from io import BytesIO
+from datetime import datetime
 
 from google.cloud import storage, aiplatform
 from PIL import Image
@@ -36,26 +37,25 @@ def result_processor_cloud_function(event, context):
     if not all([GCS_BUCKET_NAME, GCP_PROJECT_ID, GCP_REGION]):
         logging.critical("Missing required environment variables.")
         return
+        
+    # --- MODIFIED: The function now determines its own execution date. ---
+    # It no longer relies on the Vertex AI job's display name for the date.
+    # This assumes the function runs on the same UTC day as the image_processor.
+    run_date = datetime.utcnow().strftime('%Y-%m-%d')
 
     try:
         message_data = base64.b64decode(event['data']).decode('utf-8')
         log_entry = json.loads(message_data)
         job_id = log_entry['resource']['labels']['job_id']
         logging.info(f"Extracted Vertex AI Batch Prediction job ID: {job_id}")
-
-        job_resource_name = f"projects/{GCP_PROJECT_ID}/locations/{GCP_REGION}/batchPredictionJobs/{job_id}"
-        batch_job = aiplatform.BatchPredictionJob(job_resource_name)
-        run_date = batch_job.display_name.replace('batch_prediction_', '')
-        
-        if not run_date:
-            raise ValueError(f"Could not extract run_date from job display name: '{batch_job.display_name}'")
-
-        gcs_output_prefix = f"incident_outputs/{run_date}/"
-        logging.info(f"Processing prediction results for run_date '{run_date}' from GCS prefix: {gcs_output_prefix}")
+        logging.info(f"Processing results for run_date determined by system clock: {run_date}.")
 
     except Exception as e:
-        logging.error(f"Could not parse trigger event or determine run details. Error: {e}", exc_info=True)
+        logging.error(f"Could not parse trigger event. Error: {e}", exc_info=True)
         return
+
+    gcs_output_prefix = f"incident_outputs/{run_date}/"
+    logging.info(f"Expecting prediction results in GCS prefix: {gcs_output_prefix}")
 
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     
@@ -124,7 +124,6 @@ def result_processor_cloud_function(event, context):
                     img_byte_arr = BytesIO()
                     final_map_image.save(img_byte_arr, format='PNG')
                     
-                    # --- MODIFICATION: Base64 encode the image for direct embedding ---
                     encoded_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
                     folium_map_data.append({
@@ -133,7 +132,7 @@ def result_processor_cloud_function(event, context):
                         "longitude": (image_bbox[0] + image_bbox[2]) / 2,
                         "detected": prediction.get("detected"),
                         "confidence": prediction.get("confidence", 0),
-                        "encoded_png": encoded_image # Store the encoded image data
+                        "encoded_png": encoded_image
                     })
 
             except Exception as e:
@@ -144,7 +143,6 @@ def result_processor_cloud_function(event, context):
         m = folium.Map(location=[-2.5, 118], zoom_start=5)
 
         for item in folium_map_data:
-            # --- MODIFICATION: Use a Data URI to embed the image in the HTML ---
             image_uri = f"data:image/png;base64,{item['encoded_png']}"
             
             popup_html = f"""

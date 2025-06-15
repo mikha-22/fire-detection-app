@@ -34,7 +34,7 @@ def incident_detector_cloud_function(event, context):
         logging.critical("GCS_BUCKET_NAME environment variable not set. Cannot proceed.")
         return
 
-    # --- MODIFIED: Establish a single run_date for this execution ---
+    # This function, as the first in the chain, establishes the date for its own outputs.
     run_date_str = datetime.utcnow().strftime('%Y-%m-%d')
     logging.info(f"Processing for run_date: {run_date_str}")
 
@@ -92,30 +92,33 @@ def incident_detector_cloud_function(event, context):
         }
         all_incidents.append(incident_data)
 
-    # --- MODIFIED: Write incidents to GCS instead of putting in Pub/Sub ---
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     output_blob_name = f"{INCIDENTS_GCS_PREFIX}/{run_date_str}/detected_incidents.jsonl"
     
-    # Convert each incident dict to a JSON string and join with newlines
     jsonl_content = "\n".join([json.dumps(incident) for incident in all_incidents])
     
     blob = bucket.blob(output_blob_name)
     blob.upload_from_string(jsonl_content, content_type='application/jsonl')
     logging.info(f"Successfully wrote {len(all_incidents)} incidents to gs://{GCS_BUCKET_NAME}/{output_blob_name}")
 
-    # --- MODIFIED: Publish a lightweight notification message ---
+    # --- MODIFIED: Publish a lightweight notification message WITHOUT the date ---
     publisher = pubsub.PublisherClient()
     topic_path = publisher.topic_path(GCP_PROJECT_ID, OUTPUT_TOPIC_NAME)
     
-    notification_payload = {"run_date": run_date_str}
+    # The payload is now a simple signal, as the downstream function will get its own date.
+    notification_payload = {
+        "status": "incidents_detected",
+        "incident_count": len(all_incidents),
+        "completion_time": datetime.utcnow().isoformat() + "Z"
+    }
     message_json = json.dumps(notification_payload)
     message_bytes = message_json.encode('utf-8')
 
     try:
         publish_future = publisher.publish(topic_path, data=message_bytes)
         publish_future.result()
-        logging.info(f"Successfully published notification for run {run_date_str}.")
+        logging.info(f"Successfully published completion signal for {run_date_str}.")
     except Exception as e:
         logging.error(f"Failed to publish notification message. Error: {e}")
 
