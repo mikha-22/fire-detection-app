@@ -83,7 +83,6 @@ class SatelliteImageryAcquirer:
             cloud_cover = best_image.get('CLOUDY_PIXEL_PERCENTAGE').getInfo() or best_image.get('CLOUD_COVER').getInfo()
             _log_json("INFO", f"Found best available image ({image_id}) with approx {cloud_cover:.2f}% cloud cover.")
 
-            # --- MODIFICATION: Widen the scaling range for better visual representation ---
             # This prevents clipping of bright clouds/smoke in the saved file.
             rgb_image_scaled = best_image.select(['B4', 'B3', 'B2']).unitScale(0, 16000).multiply(255).toByte()
 
@@ -140,7 +139,10 @@ class SatelliteImageryAcquirer:
                     description=f"Export_{image_filename_stem}",
                     bucket=self.gcs_bucket_name,
                     fileNamePrefix=gcs_file_prefix_for_export,
-                    scale=100,
+                    
+                    # --- MODIFIED: Increased resolution ---
+                    scale=20,
+
                     region=export_geometry,
                     fileFormat='GeoTIFF',
                     maxPixels=2e10

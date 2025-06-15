@@ -53,7 +53,10 @@ def image_processor_cloud_function(event, context):
         lat = incident.get("centroid_latitude")
         lon = incident.get("centroid_longitude")
         if not all([cluster_id, lat, lon]): continue
-        bbox_size = 0.1
+        
+        # --- MODIFIED: Increased bbox_size for better context ---
+        bbox_size = 0.2
+        
         cluster_bbox = [lon - bbox_size/2, lat - bbox_size/2, lon + bbox_size/2, lat + bbox_size/2]
         regions_to_acquire.append({"id": cluster_id, "name": f"Incident area for {cluster_id}", "bbox": cluster_bbox})
 
