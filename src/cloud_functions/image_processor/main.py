@@ -82,16 +82,22 @@ def image_processor_cloud_function(event, context):
             logging.error("No images were successfully processed to create a batch input file.")
             return
 
-        batch_instance = {
-            "instance_id": f"batch_run_{run_date.replace('-', '')}",
-            "clusters": clusters_for_batch
-        }
+        # --- UPDATED: Create one instance per cluster for parallel processing ---
+        jsonl_lines = []
+        for cluster in clusters_for_batch:
+            instance = {
+                "instance_id": cluster["cluster_id"],
+                "clusters": [cluster]  # Single cluster per instance
+            }
+            jsonl_lines.append(json.dumps(instance))
         
-        jsonl_content = json.dumps(batch_instance)
+        jsonl_content = "\n".join(jsonl_lines)
         input_filename = f"incident_inputs/{run_date}.jsonl"
         blob = bucket.blob(input_filename)
         blob.upload_from_string(jsonl_content)
-        logging.info(f"Uploaded single-instance batch input file to gs://{GCS_BUCKET_NAME}/{input_filename}")
+        
+        logging.info(f"Uploaded batch input file with {len(jsonl_lines)} instances to gs://{GCS_BUCKET_NAME}/{input_filename}")
+        logging.info(f"Each instance contains 1 cluster for parallel processing across {BATCH_PREDICTION_MACHINE_TYPE} workers")
 
         aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
         model = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')[0]
