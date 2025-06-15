@@ -11,12 +11,12 @@ from sklearn.cluster import DBSCAN
 from google.cloud import pubsub, storage
 import numpy as np
 
-# --- CORRECTED: No longer need to import FIRMS_SENSORS here, the class handles it ---
-from src.firms_data_retriever.retriever import FirmsDataRetriever
+# --- FIX: Import both the class and the sensor list ---
+from src.firms_data_retriever.retriever import FirmsDataRetriever, FIRMS_SENSORS
 
 # --- Configuration ---
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
-GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME")
+GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") 
 FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
 OUTPUT_TOPIC_NAME = "wildfire-cluster-detected"
 INCIDENTS_GCS_PREFIX = "incidents"
@@ -38,11 +38,12 @@ def incident_detector_cloud_function(event, context):
     run_date_str = datetime.utcnow().strftime('%Y-%m-%d')
     logging.info(f"Processing for run_date: {run_date_str}")
 
-    # --- THE FIX: Removed the hardcoded 'sensors' argument ---
-    # The FirmsDataRetriever will now correctly use the default list of 3 sensors
-    # defined in retriever.py.
-    firms_retriever = FirmsDataRetriever(api_key=FIRMS_API_KEY, base_url="https://firms.modaps.eosdis.nasa.gov/api/area/csv/")
-    
+    # --- FIX: Pass the imported FIRMS_SENSORS list to the constructor ---
+    firms_retriever = FirmsDataRetriever(
+        api_key=FIRMS_API_KEY, 
+        base_url="https://firms.modaps.eosdis.nasa.gov/api/area/csv/",
+        sensors=FIRMS_SENSORS
+    )
     firms_df = firms_retriever.get_and_filter_firms_data([])
 
     if firms_df.empty:
