@@ -118,8 +118,7 @@ class WildfirePredictor(Predictor):
             _log_json("CRITICAL", "Prediction failed for the entire batch.", error=str(e), exc_info=True)
             raise RuntimeError(f"Prediction failed for batch: {e}")
 
-
-    def postprocess(self, prediction_results: List[Tuple[Dict[str, Any], torch.Tensor]]) -> Dict[str, List[Dict[str, Any]]]:
+    def postprocess(self, prediction_results: List[Tuple[Dict[str, Any], torch.Tensor]]) -> List[Dict[str, Any]]:
         final_predictions = []
         _log_json("INFO", f"Postprocessing {len(prediction_results)} individual cluster results.")
         
@@ -147,4 +146,4 @@ class WildfirePredictor(Predictor):
                     "detection_details": "Error during post-processing",
                     "error_message": str(e)
                 })
-        return {"predictions": final_predictions}
+        return final_predictions
