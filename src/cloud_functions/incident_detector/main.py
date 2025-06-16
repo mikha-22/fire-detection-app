@@ -22,7 +22,7 @@ OUTPUT_TOPIC_NAME = "wildfire-cluster-detected"
 DESIRED_EPS_KM = 10
 EARTH_RADIUS_KM = 6371
 DBSCAN_EPS_RADIANS = DESIRED_EPS_KM / EARTH_RADIUS_KM
-DBSCAN_MIN_SAMPLES = 3
+DBSCAN_MIN_SAMPLES 2
 PEATLAND_SHP_PATH = "src/geodata/Indonesia_peat_lands.shp"
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
