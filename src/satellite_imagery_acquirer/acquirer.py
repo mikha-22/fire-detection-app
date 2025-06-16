@@ -2,15 +2,14 @@
 
 import os
 import logging
-import ee # Google Earth Engine Python API
-import json # For structured logging of dicts
+import ee
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
-from src.common.config import GCS_BUCKET_NAME
+from src.common.config import GCS_BUCKET_NAME, GCS_PATHS
 
 # --- Configuration ---
-GCS_IMAGE_OUTPUT_PREFIX = "raw_satellite_imagery/"
 SENTINEL2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
 LANDSAT8_COLLECTION = "LANDSAT/LC08/C02/T1_L2"
 LANDSAT9_COLLECTION = "LANDSAT/LC09/C02/T1_L2"
@@ -44,9 +43,11 @@ class SatelliteImageryAcquirer:
 
         try:
             ee.Initialize(project=os.environ.get("GCP_PROJECT_ID"))
-            _log_json("INFO", "Google Earth Engine initialized successfully.", gcp_project_id=os.environ.get("GCP_PROJECT_ID"))
+            _log_json("INFO", "Google Earth Engine initialized successfully.", 
+                     gcp_project_id=os.environ.get("GCP_PROJECT_ID"))
         except Exception as e:
-            _log_json("CRITICAL", "An unexpected error occurred during GEE initialization.", error=str(e))
+            _log_json("CRITICAL", "An unexpected error occurred during GEE initialization.", 
+                     error=str(e))
             raise RuntimeError(f"GEE initialization failed: {e}")
 
     def _harmonize_band_names(self, image):
@@ -77,13 +78,13 @@ class SatelliteImageryAcquirer:
 
             image_id = ee.String(best_image.id()).getInfo()
             if image_id is None:
-                _log_json("WARNING", "No images found in the merged collection.", bbox=bbox, date_range=f"[{date_start}, {date_end})")
+                _log_json("WARNING", "No images found in the merged collection.", 
+                         bbox=bbox, date_range=f"[{date_start}, {date_end})")
                 return None
             
             cloud_cover = best_image.get('CLOUDY_PIXEL_PERCENTAGE').getInfo() or best_image.get('CLOUD_COVER').getInfo()
             _log_json("INFO", f"Found best available image ({image_id}) with approx {cloud_cover:.2f}% cloud cover.")
 
-            # This prevents clipping of bright clouds/smoke in the saved file.
             rgb_image_scaled = best_image.select(['B4', 'B3', 'B2']).unitScale(0, 16000).multiply(255).toByte()
 
             return rgb_image_scaled
@@ -95,7 +96,8 @@ class SatelliteImageryAcquirer:
             _log_json("ERROR", "An unexpected error occurred while acquiring the best image.", error=str(e))
             return None
 
-    def acquire_and_export_imagery(self, monitored_regions: List[Dict[str, Any]], acquisition_date: Optional[str] = None) -> Dict[str, str]:
+    def acquire_and_export_imagery(self, monitored_regions: List[Dict[str, Any]], 
+                                  acquisition_date: Optional[str] = None) -> Dict[str, str]:
         if acquisition_date:
             try:
                 target_date_obj = datetime.strptime(acquisition_date, '%Y-%m-%d')
@@ -120,29 +122,29 @@ class SatelliteImageryAcquirer:
         for region in monitored_regions:
             region_id = region["id"]
             region_bbox = region["bbox"]
-            image_filename_stem = f"wildfire_imagery_{region_id}_{acquisition_date.replace('-', '')}"
-            gcs_file_prefix_for_export = f"{GCS_IMAGE_OUTPUT_PREFIX}{image_filename_stem}"
-            expected_gcs_image_uri = f"gs://{self.gcs_bucket_name}/{gcs_file_prefix_for_export}.tif"
+            
+            # Use new path structure - just the filename in the satellite_imagery/date/ folder
+            image_filename = f"{region_id}.tif"
+            gcs_file_prefix = f"{GCS_PATHS['satellite_imagery']}/{acquisition_date}/{region_id}"
+            expected_gcs_image_uri = f"gs://{self.gcs_bucket_name}/{gcs_file_prefix}.tif"
 
             _log_json("INFO", "Processing imagery for region.", region_id=region_id, bbox=region_bbox)
 
             image_to_export = self._get_latest_composite_image(region_bbox, date_start_str, date_end_str)
 
             if image_to_export is None:
-                _log_json("WARNING", f"Skipping export for region '{region_id}': no suitable image found.", region_id=region_id)
+                _log_json("WARNING", f"Skipping export for region '{region_id}': no suitable image found.", 
+                         region_id=region_id)
                 continue
 
             try:
                 export_geometry = ee.Geometry.Rectangle(region_bbox).getInfo()['coordinates']
                 task = ee.batch.Export.image.toCloudStorage(
                     image=image_to_export,
-                    description=f"Export_{image_filename_stem}",
+                    description=f"Export_{region_id}_{acquisition_date.replace('-', '')}",
                     bucket=self.gcs_bucket_name,
-                    fileNamePrefix=gcs_file_prefix_for_export,
-                    
-                    # --- MODIFIED: Increased resolution ---
+                    fileNamePrefix=gcs_file_prefix,
                     scale=20,
-
                     region=export_geometry,
                     fileFormat='GeoTIFF',
                     maxPixels=2e10

@@ -5,11 +5,6 @@ Global configuration settings for the Wildfire Detection System.
 """
 
 # Define the geographic areas to monitor for wildfires.
-# Each region is a dictionary with:
-# - 'id': A unique identifier for the region.
-# - 'name': A human-readable name for the region.
-# - 'bbox': A bounding box defined as [min_longitude, min_latitude, max_longitude, max_latitude].
-# - 'description': A brief description of the region.
 MONITORED_REGIONS = [
     {
         "id": "sumatra_riau",
@@ -31,7 +26,35 @@ MONITORED_REGIONS = [
     }
 ]
 
-# Your Google Cloud Storage bucket name.
-# This bucket will be used to store raw data, processed outputs (maps, metadata),
-# and Vertex AI batch prediction inputs/outputs.
-GCS_BUCKET_NAME = "fire-app-bucket" # Ensure this is your correct bucket name
+# Your Google Cloud Storage bucket name
+GCS_BUCKET_NAME = "fire-app-bucket"
+
+# GCS Path Prefixes - Better organized structure
+GCS_PATHS = {
+    # Raw incident data from FIRMS processing
+    "incidents": "incidents",
+    
+    # Batch prediction jobs
+    "batch_jobs": "batch_jobs",
+    "batch_input": "input",
+    "batch_raw_output": "raw_output",  # Where Vertex AI writes
+    "batch_processed_output": "processed_output",  # Our processed results
+    
+    # Satellite imagery
+    "satellite_imagery": "satellite_imagery",
+    
+    # Final reports and visualizations
+    "reports": "reports",
+    "report_images": "report_images",
+}
+
+# File naming conventions
+FILE_NAMES = {
+    "incident_data": "detected_incidents.jsonl",
+    "batch_input": "batch_input.jsonl",
+    "batch_predictions": "predictions.jsonl",
+    "job_metadata": "metadata.json",
+    "job_manifest": "manifest.json",
+    "job_summary": "summary.json",
+    "report_metadata": "report_metadata.json",
+}

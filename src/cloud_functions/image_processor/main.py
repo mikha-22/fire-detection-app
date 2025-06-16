@@ -8,6 +8,7 @@ from datetime import datetime
 
 from google.cloud import aiplatform, storage
 from src.satellite_imagery_acquirer.acquirer import SatelliteImageryAcquirer
+from src.common.config import GCS_PATHS, FILE_NAMES
 
 # --- Configuration ---
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
@@ -16,11 +17,9 @@ GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME")
 VERTEX_AI_MODEL_NAME = os.environ.get("VERTEX_AI_OBJECT_DETECTION_MODEL")
 BATCH_PREDICTION_MACHINE_TYPE = "n1-standard-4"
 VERTEX_AI_BATCH_SERVICE_ACCOUNT = "fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com"
-INCIDENTS_GCS_PREFIX = "incidents" # Folder where incident data is stored
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-# --- Helper for logging structured data ---
 def _log_json(severity: str, message: str, **kwargs):
     log_entry = {
         "severity": severity.upper(),
@@ -42,20 +41,23 @@ def image_processor_cloud_function(event, context):
 
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
-    incidents_blob_name = f"{INCIDENTS_GCS_PREFIX}/{run_date}/detected_incidents.jsonl"
+    
+    # Load incidents using new path structure
+    incidents_blob_path = f"{GCS_PATHS['incidents']}/{run_date}/{FILE_NAMES['incident_data']}"
     
     try:
-        incidents_content = bucket.blob(incidents_blob_name).download_as_string().decode('utf-8')
+        incidents_content = bucket.blob(incidents_blob_path).download_as_string().decode('utf-8')
         incidents = [json.loads(line) for line in incidents_content.strip().split('\n')]
         _log_json("INFO", f"Successfully loaded {len(incidents)} incidents from GCS for date {run_date}.")
     except Exception as e:
-        _log_json("ERROR", f"Failed to read incidents file from GCS: gs://{GCS_BUCKET_NAME}/{incidents_blob_name}. Error: {e}")
+        _log_json("ERROR", f"Failed to read incidents file from GCS: gs://{GCS_BUCKET_NAME}/{incidents_blob_path}. Error: {e}")
         return
 
     if not incidents:
         _log_json("WARNING", "Incidents file was empty or could not be parsed. Exiting.")
         return
 
+    # Process regions for satellite imagery
     regions_to_acquire = []
     for incident in incidents:
         cluster_id = incident.get("cluster_id")
@@ -87,11 +89,15 @@ def image_processor_cloud_function(event, context):
                       "bbox_degrees": round(bbox_size_degrees, 4)
                   })
         
-        cluster_bbox = [lon - bbox_size_degrees/2, lat - bbox_size_degrees/2, lon + bbox_size_degrees/2, lat + bbox_size_degrees/2]
-        regions_to_acquire.append({"id": cluster_id, "name": f"Incident area for {cluster_id}", "bbox": cluster_bbox})
+        cluster_bbox = [lon - bbox_size_degrees/2, lat - bbox_size_degrees/2, 
+                       lon + bbox_size_degrees/2, lat + bbox_size_degrees/2]
+        regions_to_acquire.append({"id": cluster_id, "name": f"Incident area for {cluster_id}", 
+                                 "bbox": cluster_bbox})
 
     try:
+        # Update SatelliteImageryAcquirer to use new path
         imagery_acquirer = SatelliteImageryAcquirer(gcs_bucket_name=GCS_BUCKET_NAME)
+        # This will write to satellite_imagery/{date}/
         gcs_image_uris = imagery_acquirer.acquire_and_export_imagery(regions_to_acquire, acquisition_date=run_date)
 
         if not gcs_image_uris:
@@ -100,6 +106,7 @@ def image_processor_cloud_function(event, context):
         
         _log_json("INFO", f"Successfully initiated export for {len(gcs_image_uris)} of {len(regions_to_acquire)} requested images.")
 
+        # Prepare batch prediction input
         clusters_for_batch = []
         for region in regions_to_acquire:
             cluster_id = region["id"]
@@ -115,6 +122,7 @@ def image_processor_cloud_function(event, context):
             _log_json("ERROR", "No images were successfully processed to create a batch input file.")
             return
 
+        # Create batch input JSONL
         jsonl_lines = []
         for cluster in clusters_for_batch:
             instance = {
@@ -124,54 +132,74 @@ def image_processor_cloud_function(event, context):
             jsonl_lines.append(json.dumps(instance))
         
         jsonl_content = "\n".join(jsonl_lines)
-        input_filename = f"incident_inputs/{run_date}/{job_id}/input.jsonl"
-        blob = bucket.blob(input_filename)
+        
+        # Save batch input using new path structure
+        batch_input_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{GCS_PATHS['batch_input']}/{FILE_NAMES['batch_input']}"
+        blob = bucket.blob(batch_input_path)
         blob.upload_from_string(jsonl_content)
-        _log_json("INFO", f"Uploaded {len(jsonl_lines)} instances to gs://{GCS_BUCKET_NAME}/{input_filename}")
+        _log_json("INFO", f"Uploaded {len(jsonl_lines)} instances to gs://{GCS_BUCKET_NAME}/{batch_input_path}")
 
+        # Initialize Vertex AI and submit batch prediction
         aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
         model = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')[0]
 
         job_display_name = f"batch_prediction_{run_date}_{job_id}"
-        output_uri_prefix = f"gs://{GCS_BUCKET_NAME}/incident_outputs/{run_date}/{job_id}/"
+        
+        # Update output path to use new structure
+        output_uri_prefix = f"gs://{GCS_BUCKET_NAME}/{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{GCS_PATHS['batch_raw_output']}/"
         
         job = model.batch_predict(
             job_display_name=job_display_name,
-            gcs_source=f"gs://{GCS_BUCKET_NAME}/{input_filename}",
+            gcs_source=f"gs://{GCS_BUCKET_NAME}/{batch_input_path}",
             gcs_destination_prefix=output_uri_prefix,
             sync=False,
             machine_type=BATCH_PREDICTION_MACHINE_TYPE,
             service_account=VERTEX_AI_BATCH_SERVICE_ACCOUNT,
         )
         
-        # This log message is now slightly different because job.resource_name is not yet available
         _log_json("INFO", "Successfully submitted Vertex AI Batch Prediction job.",
                   job_display_name=job_display_name,
                   job_id=job_id,
                   output_location=output_uri_prefix)
         
-        # --- FIX: REMOVED THE CODE THAT CAUSED THE CRASH ---
-        # The following lines were removed because 'job.resource_name' is not
-        # available immediately after an async call. The manifest file is now the
-        # primary way to track job status.
-
-        # Also create/update a manifest file that lists all jobs for this date
-        manifest_filename = f"incident_outputs/{run_date}/manifest.json"
-        manifest_blob = bucket.blob(manifest_filename)
+        # Create job metadata
+        job_metadata = {
+            "job_id": job_id,
+            "run_date": run_date,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "status": "submitted",
+            "vertex_ai": {
+                "job_display_name": job_display_name,
+                "job_resource_name": job.resource_name if hasattr(job, 'resource_name') else None,
+                "model_name": VERTEX_AI_MODEL_NAME,
+                "output_location": output_uri_prefix
+            },
+            "input": {
+                "incident_count": len(incidents),
+                "cluster_count": len(clusters_for_batch),
+                "input_path": f"gs://{GCS_BUCKET_NAME}/{batch_input_path}"
+            }
+        }
         
+        # Save job metadata
+        metadata_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{FILE_NAMES['job_metadata']}"
+        bucket.blob(metadata_path).upload_from_string(json.dumps(job_metadata, indent=2))
+        
+        # Update manifest
+        manifest_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{FILE_NAMES['job_manifest']}"
         try:
-            existing_manifest = json.loads(manifest_blob.download_as_string())
+            existing_manifest = json.loads(bucket.blob(manifest_path).download_as_string())
         except:
             existing_manifest = {"run_date": run_date, "jobs": []}
         
         existing_manifest["jobs"].append({
             "job_id": job_id,
-            "created_at": datetime.utcnow().isoformat() + "Z",
-            "vertex_ai_job_display_name": job_display_name, # Storing the display name
+            "created_at": job_metadata["created_at"],
+            "vertex_ai_job_display_name": job_display_name,
             "status": "submitted"
         })
         
-        manifest_blob.upload_from_string(json.dumps(existing_manifest, indent=2))
+        bucket.blob(manifest_path).upload_from_string(json.dumps(existing_manifest, indent=2))
         _log_json("INFO", f"Updated job manifest for date {run_date} with new job {job_id}")
 
     except Exception as e:

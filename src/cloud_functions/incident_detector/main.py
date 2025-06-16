@@ -11,15 +11,14 @@ from sklearn.cluster import DBSCAN
 from google.cloud import pubsub, storage
 import numpy as np
 
-# Import both the class and the sensor list
 from src.firms_data_retriever.retriever import FirmsDataRetriever, FIRMS_SENSORS
+from src.common.config import GCS_PATHS, FILE_NAMES
 
 # --- Configuration ---
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") 
 FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
 OUTPUT_TOPIC_NAME = "wildfire-cluster-detected"
-INCIDENTS_GCS_PREFIX = "incidents"
 DESIRED_EPS_KM = 10
 EARTH_RADIUS_KM = 6371
 DBSCAN_EPS_RADIANS = DESIRED_EPS_KM / EARTH_RADIUS_KM
@@ -38,7 +37,7 @@ def incident_detector_cloud_function(event, context):
     run_date_str = datetime.utcnow().strftime('%Y-%m-%d')
     logging.info(f"Processing for run_date: {run_date_str}")
 
-    # Pass the imported FIRMS_SENSORS list to the constructor
+    # Get FIRMS data
     firms_retriever = FirmsDataRetriever(
         api_key=FIRMS_API_KEY, 
         base_url="https://firms.modaps.eosdis.nasa.gov/api/area/csv/",
@@ -50,6 +49,7 @@ def incident_detector_cloud_function(event, context):
         logging.warning("No FIRMS hotspots found globally. Exiting.")
         return
 
+    # Process with GeoPandas
     gdf = gpd.GeoDataFrame(
         firms_df, geometry=gpd.points_from_xy(firms_df.longitude, firms_df.latitude), crs="EPSG:4326"
     )
@@ -68,6 +68,7 @@ def incident_detector_cloud_function(event, context):
 
     logging.info(f"Found {len(gdf_peatland_fires)} total fire points on Indonesian peatlands.")
 
+    # Cluster detection
     coords_radians = np.radians(gdf_peatland_fires[['latitude', 'longitude']].values)
     db = DBSCAN(eps=DBSCAN_EPS_RADIANS, min_samples=DBSCAN_MIN_SAMPLES, algorithm='ball_tree', metric='haversine').fit(coords_radians)
 
@@ -83,6 +84,7 @@ def incident_detector_cloud_function(event, context):
     gdf_peatland_fires['cluster_id'] = cluster_labels
     clustered_fires = gdf_peatland_fires[gdf_peatland_fires['cluster_id'] != -1]
     
+    # Create incident data
     all_incidents = []
     for cluster_id_num in sorted(clustered_fires['cluster_id'].unique()):
         cluster_gdf = clustered_fires[clustered_fires['cluster_id'] == cluster_id_num]
@@ -97,22 +99,26 @@ def incident_detector_cloud_function(event, context):
         }
         all_incidents.append(incident_data)
 
+    # Save incidents using new path structure
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
-    output_blob_name = f"{INCIDENTS_GCS_PREFIX}/{run_date_str}/detected_incidents.jsonl"
+    output_blob_path = f"{GCS_PATHS['incidents']}/{run_date_str}/{FILE_NAMES['incident_data']}"
     
     jsonl_content = "\n".join([json.dumps(incident) for incident in all_incidents])
     
-    blob = bucket.blob(output_blob_name)
+    blob = bucket.blob(output_blob_path)
     blob.upload_from_string(jsonl_content, content_type='application/jsonl')
-    logging.info(f"Successfully wrote {len(all_incidents)} incidents to gs://{GCS_BUCKET_NAME}/{output_blob_name}")
+    logging.info(f"Successfully wrote {len(all_incidents)} incidents to gs://{GCS_BUCKET_NAME}/{output_blob_path}")
 
+    # Publish notification
     publisher = pubsub.PublisherClient()
     topic_path = publisher.topic_path(GCP_PROJECT_ID, OUTPUT_TOPIC_NAME)
     
     notification_payload = {
         "status": "incidents_detected",
         "incident_count": len(all_incidents),
+        "run_date": run_date_str,
+        "output_path": f"gs://{GCS_BUCKET_NAME}/{output_blob_path}",
         "completion_time": datetime.utcnow().isoformat() + "Z"
     }
     message_json = json.dumps(notification_payload)
