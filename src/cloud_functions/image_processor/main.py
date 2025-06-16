@@ -42,7 +42,6 @@ def image_processor_cloud_function(event, context):
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     
-    # Load incidents using new path structure
     incidents_blob_path = f"{GCS_PATHS['incidents']}/{run_date}/{FILE_NAMES['incident_data']}"
     
     try:
@@ -57,7 +56,6 @@ def image_processor_cloud_function(event, context):
         _log_json("WARNING", "Incidents file was empty or could not be parsed. Exiting.")
         return
 
-    # Process regions for satellite imagery
     regions_to_acquire = []
     for incident in incidents:
         cluster_id = incident.get("cluster_id")
@@ -95,9 +93,7 @@ def image_processor_cloud_function(event, context):
                                  "bbox": cluster_bbox})
 
     try:
-        # Update SatelliteImageryAcquirer to use new path
         imagery_acquirer = SatelliteImageryAcquirer(gcs_bucket_name=GCS_BUCKET_NAME)
-        # This will write to satellite_imagery/{date}/
         gcs_image_uris = imagery_acquirer.acquire_and_export_imagery(regions_to_acquire, acquisition_date=run_date)
 
         if not gcs_image_uris:
@@ -106,7 +102,6 @@ def image_processor_cloud_function(event, context):
         
         _log_json("INFO", f"Successfully initiated export for {len(gcs_image_uris)} of {len(regions_to_acquire)} requested images.")
 
-        # Prepare batch prediction input
         clusters_for_batch = []
         for region in regions_to_acquire:
             cluster_id = region["id"]
@@ -122,7 +117,6 @@ def image_processor_cloud_function(event, context):
             _log_json("ERROR", "No images were successfully processed to create a batch input file.")
             return
 
-        # Create batch input JSONL
         jsonl_lines = []
         for cluster in clusters_for_batch:
             instance = {
@@ -133,19 +127,16 @@ def image_processor_cloud_function(event, context):
         
         jsonl_content = "\n".join(jsonl_lines)
         
-        # Save batch input using new path structure
         batch_input_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{GCS_PATHS['batch_input']}/{FILE_NAMES['batch_input']}"
         blob = bucket.blob(batch_input_path)
         blob.upload_from_string(jsonl_content)
         _log_json("INFO", f"Uploaded {len(jsonl_lines)} instances to gs://{GCS_BUCKET_NAME}/{batch_input_path}")
 
-        # Initialize Vertex AI and submit batch prediction
         aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
         model = aiplatform.Model.list(filter=f'display_name="{VERTEX_AI_MODEL_NAME}"')[0]
 
         job_display_name = f"batch_prediction_{run_date}_{job_id}"
         
-        # Update output path to use new structure
         output_uri_prefix = f"gs://{GCS_BUCKET_NAME}/{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{GCS_PATHS['batch_raw_output']}/"
         
         job = model.batch_predict(
@@ -162,7 +153,9 @@ def image_processor_cloud_function(event, context):
                   job_id=job_id,
                   output_location=output_uri_prefix)
         
-        # Create job metadata
+        # --- FIX: Create the metadata WITHOUT accessing job.resource_name ---
+        # The 'job' object is not fully populated yet after an async call.
+        # We will create the metadata now and let the processor handle the results.
         job_metadata = {
             "job_id": job_id,
             "run_date": run_date,
@@ -170,7 +163,6 @@ def image_processor_cloud_function(event, context):
             "status": "submitted",
             "vertex_ai": {
                 "job_display_name": job_display_name,
-                "job_resource_name": job.resource_name if hasattr(job, 'resource_name') else None,
                 "model_name": VERTEX_AI_MODEL_NAME,
                 "output_location": output_uri_prefix
             },
@@ -181,15 +173,14 @@ def image_processor_cloud_function(event, context):
             }
         }
         
-        # Save job metadata
         metadata_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{FILE_NAMES['job_metadata']}"
         bucket.blob(metadata_path).upload_from_string(json.dumps(job_metadata, indent=2))
         
-        # Update manifest
         manifest_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{FILE_NAMES['job_manifest']}"
         try:
-            existing_manifest = json.loads(bucket.blob(manifest_path).download_as_string())
-        except:
+            manifest_blob = bucket.blob(manifest_path)
+            existing_manifest = json.loads(manifest_blob.download_as_string())
+        except Exception:
             existing_manifest = {"run_date": run_date, "jobs": []}
         
         existing_manifest["jobs"].append({
