@@ -57,11 +57,11 @@ def process_vertex_ai_output(prediction_files, bucket, job_id, run_date):
             content = blob.download_as_string().decode('utf-8')
             for line in content.strip().split('\n'):
                 if line:
-                    prediction = json.loads(line)
-                    # The instance_id is formatted as {cluster_id}_{source}
-                    # We need to extract the original cluster_id
-                    instance_id = prediction.get("instance_id", "")
-                    cluster_id = "_".join(instance_id.split("_")[:-1]) # Remove the source suffix
+                    result = json.loads(line)
+                    # Extract the prediction part from the Vertex AI output
+                    prediction = result.get("prediction", {})
+                    # The prediction already has the correct cluster_id (without source suffix)
+                    cluster_id = prediction.get("instance_id", "")
                     prediction['cluster_id'] = cluster_id
                     all_predictions.append(prediction)
         except Exception as e:
@@ -134,7 +134,15 @@ def result_processor_cloud_function(event, context):
         hotspots_by_cluster = {inc['cluster_id']: inc['hotspots'] for inc in [json.loads(line) for line in incidents_content.strip().split('\n')]}
         
         input_content = bucket.blob(input_path).download_as_string().decode('utf-8')
-        input_metadata = {inst['instance_id']: inst['clusters'][0] for inst in [json.loads(line) for line in input_content.strip().split('\n')]}
+        input_metadata = {}
+        for line in input_content.strip().split('\n'):
+            if line:
+                inst = json.loads(line)
+                # Map both the full instance_id and the cluster_id to the metadata
+                cluster_data = inst['clusters'][0]
+                input_metadata[inst['instance_id']] = cluster_data
+                # Also map by cluster_id for easier lookup
+                input_metadata[cluster_data['cluster_id']] = cluster_data
     except Exception as e:
         logger.error(f"Failed to load supporting data: {e}")
         return
@@ -148,19 +156,31 @@ def result_processor_cloud_function(event, context):
     m = folium.Map(location=[-2.5, 118], zoom_start=5)
 
     for cluster_id, preds_for_cluster in grouped_predictions.items():
-        # Use the first prediction's metadata to get location info
-        first_instance_id = preds_for_cluster[0]['instance_id']
-        cluster_metadata = input_metadata.get(first_instance_id)
-        if not cluster_metadata: continue
+        # Get cluster metadata - it should be stored by cluster_id now
+        cluster_metadata = input_metadata.get(cluster_id)
+        if not cluster_metadata: 
+            logger.warning(f"No metadata found for cluster {cluster_id}")
+            continue
 
         overall_detected = any(p['detected'] for p in preds_for_cluster)
         marker_color = 'red' if overall_detected else 'green'
 
         popup_html = f"<h4>Cluster ID: {cluster_id}</h4>"
-        for pred in sorted(preds_for_cluster, key=lambda p: p['instance_id']):
-            instance_id = pred['instance_id']
-            inst_meta = input_metadata.get(instance_id)
-            if not inst_meta: continue
+        
+        # Get all images for this cluster from input metadata
+        cluster_images = []
+        for key, meta in input_metadata.items():
+            if meta.get('cluster_id') == cluster_id and key != cluster_id:
+                cluster_images.append((key, meta))
+        
+        # Sort by source for consistent ordering
+        cluster_images.sort(key=lambda x: x[1].get('source', ''))
+        
+        for instance_id, inst_meta in cluster_images:
+            # Find the corresponding prediction
+            pred = next((p for p in preds_for_cluster if p.get('instance_id') == cluster_id), None)
+            if not pred:
+                continue
 
             try:
                 source = inst_meta.get('source', 'unknown')
@@ -181,8 +201,13 @@ def result_processor_cloud_function(event, context):
         iframe = folium.IFrame(popup_html, width=430, height=500)
         popup = folium.Popup(iframe, max_width=430)
         
+        # Use the centroid of the bounding box for marker placement
+        bbox = cluster_metadata['image_bbox']
+        marker_lat = (bbox[1] + bbox[3]) / 2
+        marker_lon = (bbox[0] + bbox[2]) / 2
+        
         folium.Marker(
-            location=[cluster_metadata['image_bbox'][1], cluster_metadata['image_bbox'][0]],
+            location=[marker_lat, marker_lon],
             popup=popup, tooltip=cluster_id,
             icon=folium.Icon(color=marker_color, icon='fire', prefix='fa')
         ).add_to(m)
