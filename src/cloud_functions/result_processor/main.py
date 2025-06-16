@@ -152,22 +152,28 @@ def result_processor_cloud_function(request=None, context=None):
                 
                 # Log the structure to understand it better
                 logger.debug(f"Parsed line structure - keys: {list(full_output_line.keys())}")
-                logger.debug(f"Instance data keys: {list(instance_data.keys()) if isinstance(instance_data, dict) else 'Not a dict'}")
-                logger.debug(f"Prediction data type: {type(prediction_data)}, length: {len(prediction_data) if isinstance(prediction_data, list) else 'N/A'}")
+                logger.debug(f"Instance data: {instance_data}")
+                logger.debug(f"Prediction data: {prediction_data}")
                 
                 # The prediction should be a list from our CPR model
                 if not isinstance(prediction_data, list) or not prediction_data:
                     logger.warning(f"Unexpected prediction format. Expected list, got: {type(prediction_data)}")
                     continue
                 
+                # Extract instance_id from the instance data
+                instance_id = instance_data.get('instance_id')
+                
+                if not instance_id:
+                    logger.warning(f"No instance_id found in instance data: {instance_data}")
+                    continue
+                
                 # Our CPR model returns a list of predictions
+                # Process each prediction in the list
                 for prediction in prediction_data:
-                    cluster_id = prediction.get('instance_id')
+                    # The cluster_id might be in the prediction or we use the instance_id
+                    cluster_id = prediction.get('instance_id', instance_id)
                     
-                    if not cluster_id:
-                        logger.warning(f"Skipping a prediction because it was missing an 'instance_id': {prediction}")
-                        continue
-                        
+                    # Get the input metadata for this cluster
                     input_data = input_metadata.get(cluster_id)
                     if not input_data:
                         logger.warning(f"Could not find matching input metadata for cluster_id '{cluster_id}'. Skipping.")
@@ -176,39 +182,54 @@ def result_processor_cloud_function(request=None, context=None):
                     original_image_uri = input_data['gcs_image_uri']
                     image_bbox = input_data['image_bbox']
                     
-                    img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
-                    image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
+                    # Download the original satellite image
+                    try:
+                        img_bucket_name, img_blob_name = original_image_uri.replace("gs://", "").split("/", 1)
+                        image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
+                    except Exception as e:
+                        logger.error(f"Failed to download image for cluster {cluster_id}: {e}")
+                        continue
 
+                    # Get FIRMS hotspots for this cluster
                     cluster_hotspots = hotspots_by_cluster.get(cluster_id, [])
                     firms_df = pd.DataFrame()
                     if cluster_hotspots:
                         hotspot_records = [h['properties'] for h in cluster_hotspots]
                         firms_df = pd.DataFrame.from_records(hotspot_records)
                     
-                    visualizer = MapVisualizer()
-                    final_map_image = visualizer.generate_fire_map(
-                        base_image_bytes=image_bytes, 
-                        image_bbox=image_bbox, 
-                        ai_detections=[prediction],
-                        firms_hotspots_df=firms_df,
-                        acquisition_date_str=run_date
-                    )
-                    
-                    img_byte_arr = BytesIO()
-                    final_map_image.save(img_byte_arr, format='PNG')
-                    encoded_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+                    # Generate the visualization
+                    try:
+                        visualizer = MapVisualizer()
+                        final_map_image = visualizer.generate_fire_map(
+                            base_image_bytes=image_bytes, 
+                            image_bbox=image_bbox, 
+                            ai_detections=[prediction],
+                            firms_hotspots_df=firms_df,
+                            acquisition_date_str=run_date
+                        )
+                        
+                        # Convert to base64 for embedding in HTML
+                        img_byte_arr = BytesIO()
+                        final_map_image.save(img_byte_arr, format='PNG')
+                        encoded_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
-                    folium_map_data.append({
-                        "cluster_id": cluster_id,
-                        "latitude": (image_bbox[1] + image_bbox[3]) / 2,
-                        "longitude": (image_bbox[0] + image_bbox[2]) / 2,
-                        "detected": prediction.get("detected"),
-                        "confidence": prediction.get("confidence", 0),
-                        "encoded_png": encoded_image
-                    })
+                        folium_map_data.append({
+                            "cluster_id": cluster_id,
+                            "latitude": (image_bbox[1] + image_bbox[3]) / 2,
+                            "longitude": (image_bbox[0] + image_bbox[2]) / 2,
+                            "detected": prediction.get("detected", False),
+                            "confidence": prediction.get("confidence", 0),
+                            "encoded_png": encoded_image
+                        })
+                        
+                        logger.info(f"Successfully processed cluster {cluster_id}")
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to generate visualization for cluster {cluster_id}: {e}")
+                        continue
 
             except Exception as e:
-                logger.error(f"Failed to process a prediction line: '{line}'. Error: {e}", exc_info=True)
+                logger.error(f"Failed to process a prediction line: '{line[:100]}...'. Error: {e}", exc_info=True)
 
     # --- Step 5: Generate Final Interactive Report ---
     if folium_map_data:
@@ -249,7 +270,11 @@ def result_processor_cloud_function(request=None, context=None):
         try:
             metadata_path = f"incident_outputs/{run_date}/{job_id}/metadata.json"
             metadata_blob = bucket.blob(metadata_path)
-            metadata = json.loads(metadata_blob.download_as_string())
+            try:
+                metadata = json.loads(metadata_blob.download_as_string())
+            except:
+                metadata = {"job_id": job_id, "run_date": run_date}
+                
             metadata["status"] = "completed"
             metadata["completed_at"] = datetime.utcnow().isoformat() + "Z"
             metadata["report_url"] = f"gs://{GCS_BUCKET_NAME}/{report_blob_path}"
@@ -265,5 +290,8 @@ def result_processor_cloud_function(request=None, context=None):
     
     # Return appropriate response for HTTP trigger
     if request and hasattr(request, 'get_json'):
-        return {"status": "success", "report_url": f"gs://{GCS_BUCKET_NAME}/{report_blob_path}"}, 200
+        if folium_map_data:
+            return {"status": "success", "report_url": f"gs://{GCS_BUCKET_NAME}/{report_blob_path}"}, 200
+        else:
+            return {"status": "error", "message": "No data processed"}, 500
     return
