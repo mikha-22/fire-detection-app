@@ -32,6 +32,51 @@ try:
 except Exception as e:
     logger.critical(f"Failed to initialize Vertex AI client. Error: {e}")
 
+def get_batch_prediction_output_info(job_display_name, run_date):
+    """
+    Get the actual output location from Vertex AI batch prediction job.
+    Returns the output info dict with GCS paths.
+    """
+    try:
+        # List batch prediction jobs and find the one we want
+        jobs = aiplatform.BatchPredictionJob.list(
+            filter=f'display_name="{job_display_name}"',
+            order_by="create_time desc"
+        )
+        
+        if not jobs:
+            logger.error(f"No batch prediction job found with display name: {job_display_name}")
+            return None
+        
+        job = jobs[0]  # Get the most recent one
+        
+        # Wait for job to complete if it's still running
+        if job.state.name not in ['JOB_STATE_SUCCEEDED', 'JOB_STATE_FAILED']:
+            logger.info(f"Job {job_display_name} is still running. Current state: {job.state.name}")
+            logger.info("Waiting for job to complete...")
+            job.wait()
+        
+        if job.state.name == 'JOB_STATE_FAILED':
+            logger.error(f"Batch prediction job failed: {job.error}")
+            return None
+        
+        # Get the output info
+        output_info = job.output_info
+        if output_info:
+            gcs_output_directory = output_info.gcs_output_directory
+            logger.info(f"Job completed successfully. Output directory: {gcs_output_directory}")
+            return {
+                'gcs_output_directory': gcs_output_directory,
+                'bigquery_output_dataset': output_info.bigquery_output_dataset if hasattr(output_info, 'bigquery_output_dataset') else None
+            }
+        else:
+            logger.error("Job completed but no output info available")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting batch prediction job info: {e}")
+        return None
+
 def result_processor_cloud_function(request=None, context=None):
     """
     Process results from Vertex AI batch prediction job.
@@ -114,25 +159,52 @@ def result_processor_cloud_function(request=None, context=None):
         return
 
     # --- Step 3: Find and load AI prediction results ---
-    gcs_output_prefix = f"incident_outputs/{run_date}/{job_id}/"
+    # First, get the actual output location from Vertex AI
+    job_display_name = f"batch_prediction_{run_date}_{job_id}"
+    output_info = get_batch_prediction_output_info(job_display_name, run_date)
     
-    logger.info(f"Checking for prediction files in '{gcs_output_prefix}'...")
-    
-    # List ALL files in the output directory
-    all_blobs = list(bucket.list_blobs(prefix=gcs_output_prefix))
-    logger.info(f"Found {len(all_blobs)} total files in job output directory")
-    
-    # Vertex AI might create a subdirectory, so look for prediction.results files
-    prediction_blobs = [b for b in all_blobs if 'prediction.results' in b.name or 
-                       (b.name.endswith('.jsonl') and 'prediction' in b.name)]
-    
-    if not prediction_blobs:
-        logger.error(f"No prediction result files found for job {job_id}. Files found: {[b.name for b in all_blobs]}")
+    if not output_info or not output_info.get('gcs_output_directory'):
+        logger.error(f"Failed to get output location for job {job_display_name}")
         if request and hasattr(request, 'get_json'):
-            return {"status": "error", "message": f"No prediction files found for job {job_id}"}, 404
+            return {"status": "error", "message": f"Failed to get output location for job"}, 500
         return
     
-    logger.info(f"Found {len(prediction_blobs)} prediction result file(s): {[b.name for b in prediction_blobs]}")
+    # Parse the GCS output directory
+    gcs_output_dir = output_info['gcs_output_directory']
+    logger.info(f"Vertex AI output directory: {gcs_output_dir}")
+    
+    # Extract the path from the full GCS URI
+    if gcs_output_dir.startswith('gs://'):
+        parts = gcs_output_dir.replace('gs://', '').split('/', 1)
+        if len(parts) == 2 and parts[0] == GCS_BUCKET_NAME:
+            gcs_output_prefix = parts[1]
+            if not gcs_output_prefix.endswith('/'):
+                gcs_output_prefix += '/'
+        else:
+            logger.error(f"Output directory is in different bucket or malformed: {gcs_output_dir}")
+            if request and hasattr(request, 'get_json'):
+                return {"status": "error", "message": "Output in unexpected location"}, 500
+            return
+    else:
+        gcs_output_prefix = gcs_output_dir
+    
+    logger.info(f"Looking for prediction files in: {gcs_output_prefix}")
+    
+    # List files in the actual output directory
+    all_blobs = list(bucket.list_blobs(prefix=gcs_output_prefix))
+    logger.info(f"Found {len(all_blobs)} files in output directory")
+    
+    # Find the prediction results files
+    prediction_blobs = [b for b in all_blobs if 'prediction.results' in b.name]
+    
+    if not prediction_blobs:
+        logger.error("No prediction.results files found")
+        logger.error(f"Files found: {[b.name for b in all_blobs[:10]]}")  # Log first 10 files
+        if request and hasattr(request, 'get_json'):
+            return {"status": "error", "message": "No prediction results files found"}, 404
+        return
+    
+    logger.info(f"Found {len(prediction_blobs)} prediction result file(s)")
 
     # --- Step 4: Process results and generate visualizations ---
     folium_map_data = []
