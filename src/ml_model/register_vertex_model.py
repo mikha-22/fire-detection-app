@@ -28,27 +28,42 @@ def main():
     print(f"--- Starting model registration process ---")
 
     # --- FIX: Ensure model.pth exists BEFORE building the local_model ---
-    model_path = "src/ml_model/model.pth"
+    # Check in current directory first
+    model_path = "model.pth"
     if not os.path.exists(model_path):
-         print(f"{model_path} not found. Running fire_detection_model.py to generate it...")
-         # Ensure the command context is correct, pointing to the right script path
-         os.system("python src/ml_model/fire_detection_model.py")
-         if not os.path.exists(model_path):
-             print(f"CRITICAL: Failed to generate {model_path}. Exiting.")
-             return # Exit if model still doesn't exist
-         print(f"Successfully generated {model_path}.")
+        # Try in the same directory as this script
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(script_dir, "model.pth")
+        
+        if not os.path.exists(model_path):
+            print(f"model.pth not found. Running fire_detection_model.py to generate it...")
+            # FIX: Use correct path to fire_detection_model.py
+            fire_detection_script = os.path.join(script_dir, "fire_detection_model.py")
+            if os.path.exists(fire_detection_script):
+                os.system(f"python {fire_detection_script}")
+            else:
+                print(f"CRITICAL: Cannot find fire_detection_model.py at {fire_detection_script}")
+                return
+                
+            if not os.path.exists(model_path):
+                print(f"CRITICAL: Failed to generate model.pth. Exiting.")
+                return
+            print(f"Successfully generated {model_path}.")
+    
+    print(f"Found model at: {model_path}")
     # --------------------------------------------------------------------
 
     print(f"--- Building Custom Prediction Routine container ---")
     print(f"Image URI: {IMAGE_URI}")
     
     # 1. Build the custom container using CPR. Now it will include model.pth.
+    # Use the current directory as the source directory
     local_model = LocalModel.build_cpr_model(
-        "src/ml_model/", 
+        ".",  # Current directory
         IMAGE_URI,
         # *** CORRECTED: PASS THE CLASS OBJECT, NOT A STRING ***
         predictor=WildfirePredictor,
-        requirements_path="src/ml_model/requirements.txt",
+        requirements_path="requirements.txt",
     )
     
     local_model.get_serving_container_spec()
