@@ -1,3 +1,5 @@
+# cloudbuild-incident-detector.yaml
+
 steps:
 - name: 'gcr.io/cloud-builders/gcloud'
   entrypoint: 'bash'
@@ -8,6 +10,19 @@ steps:
     cp src/cloud_functions/incident_detector/main.py deploy_staging/incident_detector/main.py
     cp src/cloud_functions/incident_detector/requirements.txt deploy_staging/incident_detector/requirements.txt
     cp -r src deploy_staging/incident_detector/src
+
+# --- NEW STEP: Install system dependencies BEFORE deploying ---
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    echo "spec:" > deploy_staging/incident_detector/cloud-function.yaml
+    echo "  runtime: python311" >> deploy_staging/incident_detector/cloud-function.yaml
+    echo "  build_config:" >> deploy_staging/incident_detector/cloud-function.yaml
+    echo "    packages:" >> deploy_staging/incident_detector/cloud-function.yaml
+    echo "    - python3-dev" >> deploy_staging/incident_detector/cloud-function.yaml
+    echo "    - gcc" >> deploy_staging/incident_detector/cloud-function.yaml
 
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: 'gcloud'
@@ -22,16 +37,13 @@ steps:
   - '--entry-point=incident_detector_cloud_function'
   - '--trigger-topic=wildfire-pipeline-initiator'
   - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
-  # --- MODIFICATION: Added GCS_BUCKET_NAME ---
   - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,FIRMS_API_KEY=0331973a7ee830ca7f026493faaa367a,GCS_BUCKET_NAME=fire-app-bucket'
   - '--timeout=540s'
   - '--memory=2GiB'
   - '--project=haryo-kebakaran'
   - '--allow-unauthenticated'
 
-# This section tells Cloud Build to use YOUR service account for the deployment.
 serviceAccount: 'projects/haryo-kebakaran/serviceAccounts/fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
-
 options:
   logging: CLOUD_LOGGING_ONLY
 timeout: '1200s'

@@ -22,12 +22,55 @@ GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 GCP_REGION = os.environ.get("GCP_REGION")
 FIRESTORE_DATABASE_ID = "fire-app-firestore-db"
+POLLING_TIMEOUT_SECONDS = 600  # 10 minutes
+POLLING_INTERVAL_SECONDS = 30  # 30 seconds
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 db = firestore.Client(database=FIRESTORE_DATABASE_ID)
 storage_client = storage.Client()
+
+# *** START OF MISSING HELPER FUNCTIONS ***
+
+def wait_for_vertex_ai_output(bucket, prefix):
+    """Polls GCS until the Vertex AI prediction output files are found."""
+    logger.info(f"Waiting for prediction files with prefix: gs://{bucket.name}/{prefix}")
+    start_time = time.time()
+    while time.time() - start_time < POLLING_TIMEOUT_SECONDS:
+        blobs = list(bucket.list_blobs(prefix=prefix))
+        prediction_files = [b for b in blobs if "prediction.results" in b.name]
+        if prediction_files:
+            logger.info(f"Found {len(prediction_files)} prediction result files.")
+            return prediction_files
+        logger.info(f"No prediction files found yet. Waiting {POLLING_INTERVAL_SECONDS}s...")
+        time.sleep(POLLING_INTERVAL_SECONDS)
+    logger.error("Timed out waiting for Vertex AI prediction files.")
+    return []
+
+def process_vertex_ai_output(prediction_files, bucket, job_id, run_date):
+    """Downloads, parses, and combines results from Vertex AI output files."""
+    all_predictions = []
+    logger.info("Processing prediction output files...")
+    for blob in prediction_files:
+        try:
+            content = blob.download_as_string().decode('utf-8')
+            for line in content.strip().split('\n'):
+                if line:
+                    prediction = json.loads(line)
+                    # The instance_id is formatted as {cluster_id}_{source}
+                    # We need to extract the original cluster_id
+                    instance_id = prediction.get("instance_id", "")
+                    cluster_id = "_".join(instance_id.split("_")[:-1]) # Remove the source suffix
+                    prediction['cluster_id'] = cluster_id
+                    all_predictions.append(prediction)
+        except Exception as e:
+            logger.error(f"Failed to process file {blob.name}: {e}")
+
+    logger.info(f"Successfully processed {len(all_predictions)} predictions.")
+    return bucket, all_predictions
+
+# *** END OF MISSING HELPER FUNCTIONS ***
 
 def result_processor_cloud_function(event, context):
     logger.info("Result Processor function triggered.")
@@ -49,7 +92,7 @@ def result_processor_cloud_function(event, context):
     
     # Logic to find the latest job_id from the manifest
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
-    manifest_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{FILE_NAMES['job_manifest']}"
+    manifest_path = f"{GCS_PATHS['PREDICTION_JOBS']}/{run_date}/{FILE_NAMES['job_manifest']}"
     try:
         manifest = json.loads(bucket.blob(manifest_path).download_as_string())
         if manifest.get("jobs"):
@@ -65,7 +108,7 @@ def result_processor_cloud_function(event, context):
     logger.info(f"Processing results for run_date: {run_date}, job_id: {job_id}")
 
     # --- Wait for and process prediction files ---
-    raw_output_prefix = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{GCS_PATHS['batch_raw_output']}/"
+    raw_output_prefix = f"{GCS_PATHS['PREDICTION_JOBS']}/{run_date}/{job_id}/{GCS_PATHS['JOB_RAW_OUTPUT']}/"
     prediction_files = wait_for_vertex_ai_output(bucket, raw_output_prefix)
     if not prediction_files:
         logger.error("No prediction files found. Exiting.")
@@ -76,15 +119,15 @@ def result_processor_cloud_function(event, context):
         logger.error("No predictions processed. Exiting.")
         return
 
-    # --- NEW: Group predictions by the original cluster_id ---
+    # --- Group predictions by the original cluster_id ---
     grouped_predictions = defaultdict(list)
     for pred in predictions:
         if pred.get("cluster_id"):
             grouped_predictions[pred["cluster_id"]].append(pred)
     
     # --- Load supporting data ---
-    incidents_path = f"{GCS_PATHS['incidents']}/{run_date}/{FILE_NAMES['incident_data']}"
-    input_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{GCS_PATHS['batch_input']}/{FILE_NAMES['batch_input']}"
+    incidents_path = f"{GCS_PATHS['INCIDENTS_DETECTED']}/{run_date}/{FILE_NAMES['incident_data']}"
+    input_path = f"{GCS_PATHS['PREDICTION_JOBS']}/{run_date}/{job_id}/{GCS_PATHS['JOB_INPUT']}/{FILE_NAMES['batch_input']}"
     try:
         incidents_content = bucket.blob(incidents_path).download_as_string().decode('utf-8')
         hotspots_by_cluster = {inc['cluster_id']: inc['hotspots'] for inc in [json.loads(line) for line in incidents_content.strip().split('\n')]}
@@ -144,7 +187,7 @@ def result_processor_cloud_function(event, context):
         ).add_to(m)
 
     report_filename = f"wildfire_report_{run_date}_{job_id}.html"
-    report_path = f"{GCS_PATHS['reports']}/{run_date}/{report_filename}"
+    report_path = f"{GCS_PATHS['FINAL_REPORTS']}/{run_date}/{report_filename}"
     local_temp_path = f"/tmp/{report_filename}"
     m.save(local_temp_path)
     bucket.blob(report_path).upload_from_filename(local_temp_path, content_type='text/html')
@@ -152,12 +195,10 @@ def result_processor_cloud_function(event, context):
 
     logger.info("Result Processor function finished successfully.")
 
-# Helper functions wait_for_vertex_ai_output and process_vertex_ai_output go here
-# They are unchanged from the previous version.
-
 if __name__ == "__main__":
     print("--- Running Result Processor locally ---")
     os.environ['IS_LOCAL_TEST'] = 'true'
+    # The environment variables are now set within this block for local execution
     os.environ['GCP_PROJECT_ID'] = 'haryo-kebakaran'
     os.environ['GCP_REGION'] = 'asia-southeast2'
     os.environ['GCS_BUCKET_NAME'] = 'fire-app-bucket'

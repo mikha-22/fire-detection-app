@@ -8,13 +8,12 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import json
 
-# Import MONITORED_REGIONS from the common config file
-from src.common.config import MONITORED_REGIONS
+# This line, which caused the error, has been removed:
+# from src.common.config import MONITORED_REGIONS 
 
 # --- Configuration ---
 FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
 FIRMS_API_BASE_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
-# --- RECOMMENDED FIX: Added the newest VIIRS NRT sensor for the best coverage ---
 FIRMS_SENSORS = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT"]
 
 # --- Logging Setup ---

@@ -45,14 +45,26 @@ class SatelliteImageryAcquirer:
         return image.select(landsat_bands).rename(sentinel_bands)
 
     def _get_best_image(self, collection: ee.ImageCollection, geometry: ee.Geometry, source_name: str) -> Optional[ee.Image]:
-        best_image_candidate = collection.filterBounds(geometry).sort('CLOUDY_PIXEL_PERCENTAGE').first()
+        # Use the correct cloud cover property name based on the satellite source.
+        cloud_property = 'CLOUDY_PIXEL_PERCENTAGE' if source_name == 'sentinel2' else 'CLOUD_COVER'
+        
+        best_image_candidate = collection.filterBounds(geometry).sort(cloud_property).first()
         
         if not best_image_candidate.getInfo():
             _log_json("WARNING", f"No suitable image found for source: {source_name}")
             return None
 
-        cloud_cover = best_image_candidate.get('CLOUDY_PIXEL_PERCENTAGE').getInfo()
-        _log_json("INFO", f"Found best {source_name} image with approx {cloud_cover:.2f}% cloud cover.")
+        try:
+            cloud_cover_property = best_image_candidate.get(cloud_property)
+            cloud_cover = cloud_cover_property.getInfo() if cloud_cover_property else None
+        except Exception:
+            cloud_cover = None
+        
+        if cloud_cover is not None and isinstance(cloud_cover, (int, float)):
+            _log_json("INFO", f"Found best {source_name} image with approx {cloud_cover:.2f}% cloud cover.")
+        else:
+            _log_json("WARNING", f"Found {source_name} image but it is missing or has invalid '{cloud_property}' property value. Proceeding anyway.")
+            
         return best_image_candidate.select(['B4', 'B3', 'B2']).unitScale(0, 16000).multiply(255).toByte()
 
     def acquire_and_export_imagery(self, monitored_regions: List[Dict[str, Any]],

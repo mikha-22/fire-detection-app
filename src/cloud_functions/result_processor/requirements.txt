@@ -2,6 +2,8 @@
 folium
 google-cloud-storage
 Pillow
-pandas  
+pandas
 google-cloud-aiplatform
+functions-framework
+google-cloud-firestore
 
