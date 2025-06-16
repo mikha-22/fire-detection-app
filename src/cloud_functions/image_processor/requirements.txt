@@ -3,5 +3,4 @@
 google-cloud-storage
 google-cloud-aiplatform
 earthengine-api
-
-    
+google-cloud-firestore   

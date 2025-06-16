@@ -8,3 +8,4 @@ google-cloud-pubsub
 geopandas
 scikit-learn
 shapely
+hdbscan

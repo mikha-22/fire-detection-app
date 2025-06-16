@@ -2,59 +2,37 @@
 
 """
 Global configuration settings for the Wildfire Detection System.
+This file defines a clean, pipeline-oriented structure for all data artifacts.
 """
-
-# Define the geographic areas to monitor for wildfires.
-MONITORED_REGIONS = [
-    {
-        "id": "sumatra_riau",
-        "name": "Sumatra - Riau Province",
-        "bbox": [100.0, -1.0, 104.0, 2.0],
-        "description": "A primary hotspot. Covers the Kampar Peninsula and coastal peatlands frequently burned for agriculture."
-    },
-    {
-        "id": "kalimantan_tengah",
-        "name": "Central Kalimantan",
-        "bbox": [111.0, -3.5, 115.5, -0.5],
-        "description": "The highest density of peat fires in SE Asia, focused on the ex-Mega Rice Project area south of Palangkaraya."
-    },
-    {
-        "id": "sumatra_selatan",
-        "name": "South Sumatra",
-        "bbox": [103.5, -4.5, 106.5, -2.0],
-        "description": "Another major fire-prone area, targeting the extensive peatlands of the Ogan Komering Ilir (OKI) regency."
-    }
-]
 
 # Your Google Cloud Storage bucket name
 GCS_BUCKET_NAME = "fire-app-bucket"
 
-# GCS Path Prefixes - Better organized structure
+# --- NEW: Pipeline-Oriented GCS Path Structure ---
+# This structure makes the data flow clear and easy to navigate.
 GCS_PATHS = {
-    # Raw incident data from FIRMS processing
-    "incidents": "incidents",
+    # Stage 0: Static data and configuration (not used yet, but good practice)
+    "CONFIG": "00_pipeline_config",
     
-    # Batch prediction jobs
-    "batch_jobs": "batch_jobs",
-    "batch_input": "input",
-    "batch_raw_output": "raw_output",  # Where Vertex AI writes
-    "batch_processed_output": "processed_output",  # Our processed results
+    # Stage 1: Initial detected incidents from FIRMS
+    "INCIDENTS_DETECTED": "01_incidents_detected",
     
-    # Satellite imagery
-    "satellite_imagery": "satellite_imagery",
+    # Stage 2: Data related to imagery and prediction jobs
+    "SATELLITE_IMAGERY": "02_satellite_imagery",
+    "PREDICTION_JOBS": "02_prediction_jobs", # Parent folder for jobs
+    "JOB_INPUT": "input",                  # Subfolder for job's input file
+    "JOB_RAW_OUTPUT": "raw_vertex_output", # Subfolder for messy Vertex AI output
     
-    # Final reports and visualizations
-    "reports": "reports",
-    "report_images": "report_images",
+    # Stage 3: Final, user-facing reports
+    "FINAL_REPORTS": "03_final_reports",
+    "REPORT_IMAGES": "images" # Subfolder for map images within a report
 }
 
-# File naming conventions
+# --- NEW: Standardized File Naming ---
 FILE_NAMES = {
-    "incident_data": "detected_incidents.jsonl",
-    "batch_input": "batch_input.jsonl",
-    "batch_predictions": "predictions.jsonl",
+    "incident_data": "incidents.jsonl",
+    "batch_input": "prediction_input.jsonl",
     "job_metadata": "metadata.json",
-    "job_manifest": "manifest.json",
-    "job_summary": "summary.json",
-    "report_metadata": "report_metadata.json",
+    "job_manifest": "daily_manifest.json",
+    "report_html": "report.html",
 }

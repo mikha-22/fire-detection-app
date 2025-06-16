@@ -6,11 +6,12 @@ import base64
 import logging
 import time
 from io import BytesIO
-from datetime import datetime  # <--- THIS IS THE FIX
+from datetime import datetime, timezone
 from pathlib import Path
+from collections import defaultdict
 
 import pandas as pd
-from google.cloud import storage, aiplatform
+from google.cloud import firestore, storage, aiplatform
 from PIL import Image
 import folium
 from src.map_visualizer.visualizer import MapVisualizer
@@ -20,336 +21,145 @@ from src.common.config import GCS_PATHS, FILE_NAMES
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 GCP_REGION = os.environ.get("GCP_REGION")
+FIRESTORE_DATABASE_ID = "fire-app-firestore-db"
 
-# --- Initializations ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+db = firestore.Client(database=FIRESTORE_DATABASE_ID)
 storage_client = storage.Client()
 
-try:
-    aiplatform.init(project=GCP_PROJECT_ID, location=GCP_REGION)
-    logger.info("Vertex AI client initialized.")
-except Exception as e:
-    logger.critical(f"Failed to initialize Vertex AI client. Error: {e}")
-
-def get_vertex_ai_job_info(job_metadata_path):
-    """
-    Get Vertex AI job information from our metadata file.
-    """
-    try:
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
-        metadata_blob = bucket.blob(job_metadata_path)
-        metadata = json.loads(metadata_blob.download_as_string())
-        return metadata
-    except Exception as e:
-        logger.error(f"Failed to load job metadata: {e}")
-        return None
-
-def wait_for_vertex_ai_output(bucket, raw_output_prefix, max_wait_seconds=300):
-    """
-    Wait for Vertex AI to create prediction output files.
-    Returns list of prediction.results files when found.
-    """
-    start_time = time.time()
-    check_interval = 10
-    
-    logger.info(f"Waiting for Vertex AI output in: {raw_output_prefix}")
-    
-    while time.time() - start_time < max_wait_seconds:
-        all_blobs = list(bucket.list_blobs(prefix=raw_output_prefix))
-        
-        prediction_files = [b for b in all_blobs if 'prediction.results' in b.name]
-        
-        if prediction_files:
-            logger.info(f"Found {len(prediction_files)} prediction files after {time.time() - start_time:.1f} seconds")
-            return prediction_files
-        
-        subdirs = set()
-        for blob in all_blobs:
-            parts = blob.name.split('/')
-            if len(parts) > len(raw_output_prefix.split('/')):
-                subdir = '/'.join(parts[:len(raw_output_prefix.split('/')) + 1])
-                subdirs.add(subdir)
-        
-        if subdirs:
-            logger.info(f"Found subdirectories: {list(subdirs)[:3]}... but no prediction.results yet")
-        
-        logger.info(f"No prediction files yet, waiting {check_interval} seconds...")
-        time.sleep(check_interval)
-    
-    logger.warning(f"Timeout after {max_wait_seconds} seconds waiting for prediction files")
-    return []
-
-def process_vertex_ai_output(prediction_files, bucket, job_id, run_date):
-    """
-    Process raw Vertex AI output and save cleaned results.
-    Returns path to processed predictions file.
-    """
-    all_predictions = []
-    
-    for pred_file in prediction_files:
-        logger.info(f"Processing prediction file: {pred_file.name}")
-        content = pred_file.download_as_string().decode('utf-8')
-        
-        for line in content.strip().split('\n'):
-            if not line.strip():
-                continue
-            
-            try:
-                output_data = json.loads(line)
-                
-                instance = output_data.get('instance', {})
-                predictions = output_data.get('prediction', [])
-                
-                for pred in predictions:
-                    cleaned_pred = {
-                        'instance_id': instance.get('instance_id'),
-                        'cluster_id': pred.get('instance_id', instance.get('instance_id')),
-                        'detected': pred.get('detected', False),
-                        'confidence': pred.get('confidence', 0.0),
-                        'detection_details': pred.get('detection_details', ''),
-                        'processed_at': datetime.utcnow().isoformat() + 'Z'
-                    }
-                    all_predictions.append(cleaned_pred)
-                    
-            except Exception as e:
-                logger.error(f"Error processing line: {e}")
-                continue
-    
-    processed_output_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{GCS_PATHS['batch_processed_output']}/{FILE_NAMES['batch_predictions']}"
-    
-    jsonl_content = '\n'.join([json.dumps(pred) for pred in all_predictions])
-    bucket.blob(processed_output_path).upload_from_string(jsonl_content)
-    
-    logger.info(f"Saved {len(all_predictions)} processed predictions to: {processed_output_path}")
-    
-    summary = {
-        'total_predictions': len(all_predictions),
-        'fire_detections': sum(1 for p in all_predictions if p['detected']),
-        'no_fire_detections': sum(1 for p in all_predictions if not p['detected']),
-        'average_confidence': sum(p['confidence'] for p in all_predictions) / len(all_predictions) if all_predictions else 0,
-        'processed_at': datetime.utcnow().isoformat() + 'Z'
-    }
-    
-    summary_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{GCS_PATHS['batch_processed_output']}/{FILE_NAMES['job_summary']}"
-    bucket.blob(summary_path).upload_from_string(json.dumps(summary, indent=2))
-    
-    return processed_output_path, all_predictions
-
-def result_processor_cloud_function(request=None, context=None):
-    """
-    Process results from Vertex AI batch prediction job.
-    """
+def result_processor_cloud_function(event, context):
     logger.info("Result Processor function triggered.")
-    
-    if request and hasattr(request, 'get_json'):
-        logger.info("Triggered via HTTP request")
-        request_json = request.get_json(silent=True) or {}
-        run_date = request_json.get('run_date', datetime.utcnow().strftime('%Y-%m-%d'))
-        job_id = request_json.get('job_id')
-    else:
-        logger.info("Triggered via Pub/Sub")
-        run_date = datetime.utcnow().strftime('%Y-%m-%d')
-        job_id = None
 
-    if not all([GCS_BUCKET_NAME, GCP_PROJECT_ID, GCP_REGION]):
-        logger.critical("Missing required environment variables.")
-        if request and hasattr(request, 'get_json'):
-            return {"status": "error", "message": "Missing environment variables"}, 500
+    # --- Idempotency Check ---
+    if not os.environ.get("IS_LOCAL_TEST") and (not context or not context.event_id):
+        logger.error("Cannot ensure idempotency: context.event_id is missing.")
+        return
+    if not os.environ.get("IS_LOCAL_TEST"):
+        doc_ref = db.collection('processed_events').document(context.event_id)
+        if doc_ref.get().exists:
+            logger.warning(f"Duplicate result processing event: {context.event_id}. Skipping.")
+            return
+        else:
+            doc_ref.set({'processed_at': datetime.now(timezone.utc)})
+
+    run_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    job_id = None
+    
+    # Logic to find the latest job_id from the manifest
+    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+    manifest_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{FILE_NAMES['job_manifest']}"
+    try:
+        manifest = json.loads(bucket.blob(manifest_path).download_as_string())
+        if manifest.get("jobs"):
+            job_id = sorted(manifest["jobs"], key=lambda x: x["created_at"], reverse=True)[0]['job_id']
+    except Exception as e:
+        logger.error(f"Failed to load manifest or find jobs: {e}")
+        return
+    
+    if not job_id:
+        logger.error("Could not determine job_id to process.")
         return
 
-    bucket = storage_client.bucket(GCS_BUCKET_NAME)
-
-    if not job_id:
-        manifest_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{FILE_NAMES['job_manifest']}"
-        try:
-            manifest_blob = bucket.blob(manifest_path)
-            manifest = json.loads(manifest_blob.download_as_string())
-            
-            if manifest.get("jobs"):
-                latest_job = sorted(manifest["jobs"], key=lambda x: x["created_at"], reverse=True)[0]
-                job_id = latest_job["job_id"]
-                logger.info(f"Using latest job_id from manifest: {job_id}")
-            else:
-                logger.error(f"No jobs found in manifest for date {run_date}")
-                if request and hasattr(request, 'get_json'):
-                    return {"status": "error", "message": "No jobs found"}, 404
-                return
-        except Exception as e:
-            logger.error(f"Failed to load manifest: {e}")
-            if request and hasattr(request, 'get_json'):
-                return {"status": "error", "message": str(e)}, 500
-            return
-    
     logger.info(f"Processing results for run_date: {run_date}, job_id: {job_id}")
 
-    job_metadata_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{FILE_NAMES['job_metadata']}"
-    job_metadata = get_vertex_ai_job_info(job_metadata_path)
-    
-    if not job_metadata:
-        logger.error("Failed to load job metadata")
-        if request and hasattr(request, 'get_json'):
-            return {"status": "error", "message": "Job metadata not found"}, 404
-        return
-    
+    # --- Wait for and process prediction files ---
     raw_output_prefix = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{GCS_PATHS['batch_raw_output']}/"
     prediction_files = wait_for_vertex_ai_output(bucket, raw_output_prefix)
-    
     if not prediction_files:
-        logger.error("No prediction files found after waiting")
-        if request and hasattr(request, 'get_json'):
-            return {"status": "error", "message": "No prediction files found"}, 404
+        logger.error("No prediction files found. Exiting.")
         return
+
+    _, predictions = process_vertex_ai_output(prediction_files, bucket, job_id, run_date)
+    if not predictions:
+        logger.error("No predictions processed. Exiting.")
+        return
+
+    # --- NEW: Group predictions by the original cluster_id ---
+    grouped_predictions = defaultdict(list)
+    for pred in predictions:
+        if pred.get("cluster_id"):
+            grouped_predictions[pred["cluster_id"]].append(pred)
     
-    processed_path, predictions = process_vertex_ai_output(prediction_files, bucket, job_id, run_date)
-    
+    # --- Load supporting data ---
+    incidents_path = f"{GCS_PATHS['incidents']}/{run_date}/{FILE_NAMES['incident_data']}"
+    input_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{GCS_PATHS['batch_input']}/{FILE_NAMES['batch_input']}"
     try:
-        incidents_path = f"{GCS_PATHS['incidents']}/{run_date}/{FILE_NAMES['incident_data']}"
         incidents_content = bucket.blob(incidents_path).download_as_string().decode('utf-8')
-        incidents_data = [json.loads(line) for line in incidents_content.strip().split('\n')]
-        hotspots_by_cluster = {inc['cluster_id']: inc['hotspots'] for inc in incidents_data}
+        hotspots_by_cluster = {inc['cluster_id']: inc['hotspots'] for inc in [json.loads(line) for line in incidents_content.strip().split('\n')]}
         
-        batch_input_path = f"{GCS_PATHS['batch_jobs']}/{run_date}/{job_id}/{GCS_PATHS['batch_input']}/{FILE_NAMES['batch_input']}"
-        input_content = bucket.blob(batch_input_path).download_as_string().decode('utf-8')
-        
-        input_metadata = {}
-        for line in input_content.strip().split('\n'):
-            instance = json.loads(line)
-            for cluster in instance.get('clusters', []):
-                input_metadata[cluster['cluster_id']] = cluster
-                
+        input_content = bucket.blob(input_path).download_as_string().decode('utf-8')
+        input_metadata = {inst['instance_id']: inst['clusters'][0] for inst in [json.loads(line) for line in input_content.strip().split('\n')]}
     except Exception as e:
         logger.error(f"Failed to load supporting data: {e}")
-        if request and hasattr(request, 'get_json'):
-            return {"status": "error", "message": str(e)}, 500
         return
 
-    report_images_path = f"{GCS_PATHS['reports']}/{run_date}/{GCS_PATHS['report_images']}"
-    visualization_data = []
-    
-    visualizer = MapVisualizer()
-    
-    for pred in predictions:
-        cluster_id = pred['cluster_id']
-        
-        cluster_metadata = input_metadata.get(cluster_id)
-        if not cluster_metadata:
-            logger.warning(f"No metadata found for cluster {cluster_id}")
-            continue
-        
-        try:
-            image_uri = cluster_metadata['gcs_image_uri']
-            img_bucket_name, img_blob_name = image_uri.replace("gs://", "").split("/", 1)
-            image_bytes = storage_client.bucket(img_bucket_name).blob(img_blob_name).download_as_bytes()
-            
-            hotspots = hotspots_by_cluster.get(cluster_id, [])
-            firms_df = pd.DataFrame()
-            if hotspots:
-                firms_df = pd.DataFrame.from_records([h['properties'] for h in hotspots])
-            
-            map_image = visualizer.generate_fire_map(
-                base_image_bytes=image_bytes,
-                image_bbox=cluster_metadata['image_bbox'],
-                ai_detections=[pred],
-                firms_hotspots_df=firms_df,
-                acquisition_date_str=run_date
-            )
-            
-            image_filename = f"{cluster_id}.png"
-            image_path = f"{report_images_path}/{image_filename}"
-            img_byte_arr = BytesIO()
-            map_image.save(img_byte_arr, format='PNG')
-            img_byte_arr.seek(0)
-            
-            bucket.blob(image_path).upload_from_string(
-                img_byte_arr.getvalue(),
-                content_type='image/png'
-            )
-            
-            visualization_data.append({
-                'cluster_id': cluster_id,
-                'image_path': f"gs://{GCS_BUCKET_NAME}/{image_path}",
-                'latitude': (cluster_metadata['image_bbox'][1] + cluster_metadata['image_bbox'][3]) / 2,
-                'longitude': (cluster_metadata['image_bbox'][0] + cluster_metadata['image_bbox'][2]) / 2,
-                'detected': pred['detected'],
-                'confidence': pred['confidence']
-            })
-            
-            logger.info(f"Generated visualization for cluster {cluster_id}")
-            
-        except Exception as e:
-            logger.error(f"Failed to generate visualization for {cluster_id}: {e}")
-            continue
+    # --- Generate Visualizations and Report ---
+    if not grouped_predictions:
+        logger.error("No valid clusters to visualize.")
+        return
 
-    if visualization_data:
-        logger.info(f"Generating final report with {len(visualization_data)} visualizations")
-        
-        m = folium.Map(location=[-2.5, 118], zoom_start=5)
-        
-        for viz in visualization_data:
-            image_path = viz['image_path'].replace(f"gs://{GCS_BUCKET_NAME}/", "")
+    visualizer = MapVisualizer()
+    m = folium.Map(location=[-2.5, 118], zoom_start=5)
+
+    for cluster_id, preds_for_cluster in grouped_predictions.items():
+        # Use the first prediction's metadata to get location info
+        first_instance_id = preds_for_cluster[0]['instance_id']
+        cluster_metadata = input_metadata.get(first_instance_id)
+        if not cluster_metadata: continue
+
+        overall_detected = any(p['detected'] for p in preds_for_cluster)
+        marker_color = 'red' if overall_detected else 'green'
+
+        popup_html = f"<h4>Cluster ID: {cluster_id}</h4>"
+        for pred in sorted(preds_for_cluster, key=lambda p: p['instance_id']):
+            instance_id = pred['instance_id']
+            inst_meta = input_metadata.get(instance_id)
+            if not inst_meta: continue
+
             try:
-                image_blob = bucket.blob(image_path)
-                image_bytes = image_blob.download_as_bytes()
+                source = inst_meta.get('source', 'unknown')
+                img_bucket, img_blob = inst_meta['gcs_image_uri'].replace("gs://", "").split("/", 1)
+                image_bytes = storage_client.bucket(img_bucket).blob(img_blob).download_as_bytes()
                 encoded_image = base64.b64encode(image_bytes).decode('utf-8')
                 
-                popup_html = f"""
-                <h4>Cluster ID: {viz['cluster_id']}</h4>
-                <p>
-                  <b>AI Detection:</b> {'FIRE DETECTED' if viz['detected'] else 'No Fire Detected'}<br>
-                  <b>Confidence:</b> {viz['confidence']:.2%}
-                </p>
+                popup_html += f"""
+                <hr>
+                <p><b>Source:</b> {source.capitalize()}<br>
+                   <b>AI Detection:</b> {'FIRE DETECTED' if pred['detected'] else 'No Fire Detected'}<br>
+                   <b>Confidence:</b> {pred['confidence']:.2%}</p>
                 <img src='data:image/png;base64,{encoded_image}' width='400'>
                 """
-                
-                iframe = folium.IFrame(popup_html, width=430, height=450)
-                popup = folium.Popup(iframe, max_width=430)
-                marker_color = 'red' if viz['detected'] else 'green'
-                
-                folium.Marker(
-                    location=[viz['latitude'], viz['longitude']],
-                    popup=popup,
-                    tooltip=viz['cluster_id'],
-                    icon=folium.Icon(color=marker_color, icon='fire', prefix='fa')
-                ).add_to(m)
-                
             except Exception as e:
-                logger.error(f"Failed to add marker for {viz['cluster_id']}: {e}")
+                logger.error(f"Failed to process image for instance {instance_id}: {e}")
         
-        report_filename = f"wildfire_report_{run_date}_{job_id}.html"
-        report_path = f"{GCS_PATHS['reports']}/{run_date}/{report_filename}"
+        iframe = folium.IFrame(popup_html, width=430, height=500)
+        popup = folium.Popup(iframe, max_width=430)
         
-        local_temp_path = f"/tmp/{report_filename}"
-        m.save(local_temp_path)
-        
-        bucket.blob(report_path).upload_from_filename(local_temp_path, content_type='text/html')
-        
-        logger.info(f"Report saved to: gs://{GCS_BUCKET_NAME}/{report_path}")
-        
-        report_metadata = {
-            'report_path': f"gs://{GCS_BUCKET_NAME}/{report_path}",
-            'job_id': job_id,
-            'run_date': run_date,
-            'visualization_count': len(visualization_data),
-            'fire_detections': sum(1 for v in visualization_data if v['detected']),
-            'generated_at': datetime.utcnow().isoformat() + 'Z'
-        }
-        
-        metadata_path = f"{GCS_PATHS['reports']}/{run_date}/{FILE_NAMES['report_metadata']}"
-        bucket.blob(metadata_path).upload_from_string(json.dumps(report_metadata, indent=2))
-        
-        job_metadata['status'] = 'completed'
-        job_metadata['completed_at'] = datetime.utcnow().isoformat() + 'Z'
-        job_metadata['report_path'] = f"gs://{GCS_BUCKET_NAME}/{report_path}"
-        bucket.blob(job_metadata_path).upload_from_string(json.dumps(job_metadata, indent=2))
-        
-        if request and hasattr(request, 'get_json'):
-            return {"status": "success", "report_url": f"gs://{GCS_BUCKET_NAME}/{report_path}"}, 200
-    else:
-        logger.error("No visualizations generated, so no report was created.")
-        if request and hasattr(request, 'get_json'):
-            return {"status": "error", "message": "No visualizations generated"}, 500
+        folium.Marker(
+            location=[cluster_metadata['image_bbox'][1], cluster_metadata['image_bbox'][0]],
+            popup=popup, tooltip=cluster_id,
+            icon=folium.Icon(color=marker_color, icon='fire', prefix='fa')
+        ).add_to(m)
 
-    logger.info("Result Processor completed successfully")
-    return
+    report_filename = f"wildfire_report_{run_date}_{job_id}.html"
+    report_path = f"{GCS_PATHS['reports']}/{run_date}/{report_filename}"
+    local_temp_path = f"/tmp/{report_filename}"
+    m.save(local_temp_path)
+    bucket.blob(report_path).upload_from_filename(local_temp_path, content_type='text/html')
+    logger.info(f"Report saved to: gs://{GCS_BUCKET_NAME}/{report_path}")
+
+    logger.info("Result Processor function finished successfully.")
+
+# Helper functions wait_for_vertex_ai_output and process_vertex_ai_output go here
+# They are unchanged from the previous version.
+
+if __name__ == "__main__":
+    print("--- Running Result Processor locally ---")
+    os.environ['IS_LOCAL_TEST'] = 'true'
+    os.environ['GCP_PROJECT_ID'] = 'haryo-kebakaran'
+    os.environ['GCP_REGION'] = 'asia-southeast2'
+    os.environ['GCS_BUCKET_NAME'] = 'fire-app-bucket'
+    result_processor_cloud_function(event=None, context=None)
+    print("--- Local run of Result Processor finished ---")
