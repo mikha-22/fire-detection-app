@@ -7,11 +7,11 @@ geopandas
 scikit-learn
 shapely
 hdbscan
-earthengine-api
 paramiko
 openmeteo-requests
 requests-cache
-google-api-python-client
 retry-requests
 numpy
-pytz # <-- ADD THIS LINE
+pytz
+earthengine-api
+scipy
