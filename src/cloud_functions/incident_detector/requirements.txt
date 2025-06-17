@@ -1,11 +1,18 @@
-# New requirements for the Incident Detector function
+# Requirements for the Incident Detector function
+# Note: Versions are not pinned, which may be suitable for development but carries
+# risks in production due to potential for breaking changes in dependencies.
 requests
 pandas
 google-cloud-storage
 google-cloud-pubsub
-
-# Geospatial and Machine Learning libraries
 geopandas
 scikit-learn
 shapely
 hdbscan
+earthengine-api
+paramiko
+openmeteo-requests
+requests-cache
+google-api-python-client
+retry-requests
+numpy
