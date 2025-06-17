@@ -127,8 +127,7 @@ def result_processor_cloud_function(event, context):
     
     # --- Load supporting data ---
     incidents_path = f"{GCS_PATHS['INCIDENTS_DETECTED']}/{run_date}/{FILE_NAMES['incident_data']}"
-    # FIX: Remove the incorrect subfolder from input_path
-    input_path = f"{GCS_PATHS['PREDICTION_JOBS']}/{run_date}/{job_id}/{FILE_NAMES['batch_input']}"
+    input_path = f"{GCS_PATHS['PREDICTION_JOBS']}/{run_date}/{job_id}/{GCS_PATHS['JOB_INPUT']}/{FILE_NAMES['batch_input']}"
     try:
         incidents_content = bucket.blob(incidents_path).download_as_string().decode('utf-8')
         hotspots_by_cluster = {inc['cluster_id']: inc['hotspots'] for inc in [json.loads(line) for line in incidents_content.strip().split('\n')]}
