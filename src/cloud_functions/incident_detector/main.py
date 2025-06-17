@@ -3,8 +3,9 @@
 import os
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from typing import Optional
+import pytz 
 
 # Data Handling and Geospatial
 import pandas as pd
@@ -17,7 +18,7 @@ from google.cloud import pubsub, storage
 
 # --- Local Application Imports ---
 from src.firms_data_retriever.retriever import FirmsDataRetriever
-from src.jaxa_data_retriever.retriever import JaxaDataRetriever # <-- NEW
+from src.jaxa_data_retriever.retriever import JaxaDataRetriever
 from src.common.config import GCS_PATHS, FILE_NAMES, GCS_BUCKET_NAME
 
 # --- Configuration ---
@@ -34,60 +35,48 @@ INDONESIA_BBOX = [95.0, -11.0, 141.0, 6.0]
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 # --- Data Standardization Utility ---
-
 def standardize_hotspot_df(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
-    """
-    Standardizes a hotspot dataframe to a common schema.
-    """
-    if df.empty:
-        return df
-
+    if df.empty: return df
     df = df.copy()
-    rename_map = {}
-    if source_name == 'FIRMS':
-        rename_map = {'acq_date': 'acq_date', 'acq_time': 'acq_time'}
-    elif source_name == 'JAXA':
-        # No renaming needed as we supply column names during read
-        pass
-
-    df.rename(columns=rename_map, inplace=True)
+    if source_name == 'JAXA': pass
+    else: df.rename(columns={'acq_date': 'acq_date', 'acq_time': 'acq_time'}, inplace=True)
     df['source'] = source_name
-
     if 'latitude' not in df.columns or 'longitude' not in df.columns:
         logging.error(f"Latitude/Longitude columns not found in {source_name} data.")
         return pd.DataFrame()
-
     try:
         if source_name == 'FIRMS':
             time_str = df['acq_time'].astype(str).str.zfill(4)
             df['acq_datetime'] = pd.to_datetime(df['acq_date'] + ' ' + time_str, format='%Y-%m-%d %H%M', utc=True)
         elif source_name == 'JAXA':
-            df['acq_datetime'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']])
-            df['acq_datetime'] = df['acq_datetime'].dt.tz_localize('UTC')
+            df['acq_datetime'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']]).dt.tz_localize('UTC')
     except Exception as e:
-        logging.warning(f"Could not parse datetime for {source_name}: {e}.")
+        logging.warning(f"Datetime parsing error for {source_name}: {e}.")
         df['acq_datetime'] = pd.NaT
-
     df.dropna(subset=['latitude', 'longitude', 'acq_datetime'], inplace=True)
-
     for col in ['latitude', 'longitude', 'frp_mean', 'frp_max', 'confidence', 'n_detections']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
+        if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
     canonical_cols = ['latitude', 'longitude', 'acq_datetime', 'source', 'frp_mean', 'frp_max', 'confidence', 'n_detections']
     return df[[col for col in canonical_cols if col in df.columns]]
 
-
 # --- Main Cloud Function ---
-
 def incident_detector_cloud_function(event, context, run_date_str: Optional[str] = None):
-    if run_date_str is None:
-        run_date = datetime.now(timezone.utc)
-        run_date_str = run_date.strftime('%Y-%m-%d')
+    
+    if run_date_str:
+        # This branch is now only for special, manual test cases
+        target_date_for_processing = datetime.strptime(run_date_str, '%Y-%m-%d')
+        logging.info(f"--- RUNNING IN OVERRIDE MODE FOR DATE: {run_date_str} ---")
     else:
-        run_date = datetime.strptime(run_date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+        # This is the production logic that will now run during local tests
+        jakarta_tz = pytz.timezone('Asia/Jakarta')
+        now_in_jakarta = datetime.now(jakarta_tz)
+        target_date_for_processing = now_in_jakarta - timedelta(days=1)
+        run_date_str = target_date_for_processing.strftime('%Y-%m-%d')
+        logging.info(f"--- RUNNING IN PRODUCTION MODE ---")
 
-    logging.info(f"Incident Detector triggered for date: {run_date_str}")
+    logging.info(f"Target processing date (Jakarta Time): {run_date_str}")
+    
+    run_date_utc = datetime.strptime(run_date_str, '%Y-%m-%d').replace(tzinfo=pytz.utc)
 
     all_hotspots_dfs = []
 
@@ -102,9 +91,8 @@ def incident_detector_cloud_function(event, context, run_date_str: Optional[str]
 
     # Ingest from JAXA
     try:
-        # --- REFACTORED: Use the new dedicated retriever ---
         jaxa_retriever = JaxaDataRetriever()
-        jaxa_df = jaxa_retriever.get_l3_hourly_data(target_date=run_date)
+        jaxa_df = jaxa_retriever.get_l3_hourly_data(target_date=run_date_utc)
         if not jaxa_df.empty:
             all_hotspots_dfs.append(standardize_hotspot_df(jaxa_df, 'JAXA'))
     except Exception as e:
@@ -167,13 +155,14 @@ def incident_detector_cloud_function(event, context, run_date_str: Optional[str]
     logging.info("Incident Detector function finished successfully.")
 
 if __name__ == "__main__":
-    print("--- Running Incident Detector with Refactored JAXA Retriever ---")
+    print("--- Running Incident Detector in LOCAL PRODUCTION MODE ---")
+    print("--- This will use timezone-aware logic to determine yesterday's date ---")
     os.environ['GCP_PROJECT_ID'] = 'haryo-kebakaran'
     os.environ['GCS_BUCKET_NAME'] = 'fire-app-bucket'
     if 'FIRMS_API_KEY' not in os.environ:
         os.environ['FIRMS_API_KEY'] = 'your_firms_api_key_here'
-    
-    test_date = "2025-06-17"
-    incident_detector_cloud_function(event=None, context=None, run_date_str=test_date)
-    
+
+    # --- KEY CHANGE: Call the function without a date to test the production logic ---
+    incident_detector_cloud_function(event=None, context=None)
+
     print("--- Local run of Incident Detector finished ---")

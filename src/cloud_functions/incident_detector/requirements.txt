@@ -1,6 +1,4 @@
 # Requirements for the Incident Detector function
-# Note: Versions are not pinned, which may be suitable for development but carries
-# risks in production due to potential for breaking changes in dependencies.
 requests
 pandas
 google-cloud-storage
@@ -16,3 +14,4 @@ requests-cache
 google-api-python-client
 retry-requests
 numpy
+pytz # <-- ADD THIS LINE
