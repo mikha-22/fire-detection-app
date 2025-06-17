@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 from google.cloud.aiplatform.prediction.predictor import Predictor
 
-# --- Heuristic Model Logic (self-contained within the predictor file) ---
+# --- Heuristic Model Logic (This class remains correct) ---
 class FireRiskHeuristicModel:
     def __init__(self, config: Dict[str, Any]):
         if 'criteria' not in config or not isinstance(config['criteria'], list):
@@ -31,32 +31,21 @@ class FireRiskHeuristicModel:
         return value
 
     def _get_criterion_score(self, criterion: Dict[str, Any], data: Dict[str, Any]) -> float:
-        """
-        Calculates the score for a single criterion based on input data.
-        """
         data_key = criterion['data_key']
         value = self._get_value_from_dot_key(data, data_key)
 
-        if value is None:
-            return 5.0
+        if value is None: return 5.0
 
         if criterion['type'] == 'categorical':
             return float(criterion['mapping'].get(str(value).lower(), 5.0))
         
         elif criterion['type'] == 'numerical_threshold':
             direction = criterion.get("direction", "ascending")
-            
             sorted_thresholds = sorted(criterion['mapping'].items(), key=lambda item: float(item[0]))
-
             for threshold, score in sorted_thresholds:
-                if float(value) <= float(threshold):
-                    return float(score)
-            
-            if direction == "ascending":
-                return float(max(criterion['mapping'].values()))
-            else: # "descending"
-                return float(min(criterion['mapping'].values()))
-            
+                if float(value) <= float(threshold): return float(score)
+            if direction == "ascending": return float(max(criterion['mapping'].values()))
+            else: return float(min(criterion['mapping'].values()))
         else:
             raise ValueError(f"Unsupported criterion type: {criterion['type']}")
 
@@ -83,8 +72,28 @@ class WildfireHeuristicPredictor(Predictor):
             model_config = json.load(f)
         self._model = FireRiskHeuristicModel(config=model_config)
 
+    # --- THIS IS THE CORRECTED PREPROCESS METHOD ---
     def preprocess(self, prediction_input: Dict[str, Any]) -> List[Dict[str, Any]]:
-        return prediction_input["instances"]
+        """
+        Pre-processes the input by calculating derived values needed by the model.
+        This is where all data preparation logic should live.
+        """
+        processed_instances = []
+        for instance in prediction_input["instances"]:
+            # Calculate the average Fire Radiative Power (FRP)
+            hotspots = instance.get("hotspots", [])
+            if hotspots:
+                frp_values = [h['properties']['frp_mean'] for h in hotspots if 'frp_mean' in h.get('properties', {})]
+                avg_frp = np.mean(frp_values) if frp_values else 0
+            else:
+                avg_frp = 0
+            
+            # Add the newly calculated value to the instance for the model to use
+            instance['avg_frp'] = avg_frp
+            processed_instances.append(instance)
+            
+        return processed_instances
+    # --- END OF CORRECTION ---
 
     def predict(self, instances: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         predictions = []

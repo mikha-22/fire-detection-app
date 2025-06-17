@@ -15,7 +15,7 @@ The content is organized as follows:
 2. Repository information
 3. Directory structure
 4. Repository files (if enabled)
-4. Repository files, each consisting of:
+5. Multiple file entries, each consisting of:
   - File path as an attribute
   - Full contents of the file
 </file_format>
@@ -37,477 +37,1735 @@ The content is organized as follows:
 - Files are sorted by Git change count (files with more changes are at the bottom)
 </notes>
 
-<additional_info>
-
-</additional_info>
-
 </file_summary>
 
 <directory_structure>
-Dockerfile
-fire_detection_model.py
-handler.py
+config.json
+Dockerfile.debug
+fully_offline.py
+incidents.jsonl
+predictor.py
 register_vertex_model.py
 requirements.txt
+temp_request.json
+test_fully_offline.py
+test_logic_offline.py
+test_with_gcs.py
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
 
-<file path="Dockerfile">
-FROM pytorch/pytorch:2.4.0-cuda11.8-cudnn9-runtime
-
-LABEL maintainer="Wildfire Detection Team <dev@example.com>"
-LABEL version="0.1.0"
-LABEL description="TorchServe container for Wildfire Detection AI Model"
-
-ENV PATH="/opt/conda/bin:${PATH}"
-ENV HOME="/home/model-server"
-ENV PYTHONUNBUFFERED=TRUE
-ENV TEMP_DIR_PATH="/tmp"
-
-WORKDIR ${HOME}
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends openjdk-11-jdk-headless curl wget && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN pip install --no-cache-dir --upgrade pip
-
-COPY src/ml_model/requirements.txt .
-
-RUN pip install --no-cache-dir --default-timeout=120 --retries=3 \
-    "torchserve==0.7.0" \
-    "torch-model-archiver==0.7.0" \
-    -r requirements.txt
-
-COPY src/ml_model/fire_detection_model.py .
-COPY src/ml_model/handler.py .
-
-COPY src/ml_model/model.mar ./model_store/model.mar
-
-EXPOSE 8080
-EXPOSE 8081
-EXPOSE 8082
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
-  CMD curl -f http://localhost:8080/ping || exit 1
-
-ENTRYPOINT ["torchserve"]
-
-CMD ["--start", "--model-store", "/home/model-server/model_store", "--models", "model=model.mar"]
+<file path="config.json">
+{
+    "criteria": [
+        {
+            "name": "Fire Intensity (Avg FRP)",
+            "data_key": "avg_frp",
+            "weight": 0.30,
+            "type": "numerical_threshold",
+            "direction": "ascending",
+            "mapping": {
+                "100": 2.0, "500": 5.0, "1000": 8.0, "1500": 10.0
+            }
+        },
+        {
+            "name": "Hotspot Density",
+            "data_key": "point_count",
+            "weight": 0.25,
+            "type": "numerical_threshold",
+            "direction": "ascending",
+            "mapping": {
+                "5": 2.0, "10": 4.0, "20": 7.0, "30": 10.0
+            }
+        },
+        {
+            "name": "Air Quality Impact",
+            "data_key": "realtime_context.air_quality.air_quality_severity",
+            "weight": 0.20,
+            "type": "categorical",
+            "mapping": {
+                "low": 1.0, "moderate": 4.0, "high": 7.0, "severe": 10.0, "unknown": 3.0
+            }
+        },
+        {
+            "name": "Precipitation (Rain)",
+            "data_key": "realtime_context.weather.precipitation_mm",
+            "weight": 0.15,
+            "type": "numerical_threshold",
+            "direction": "ascending",
+            "mapping": {
+                "0": 10.0, "0.1": 1.0
+            }
+        },
+        {
+            "name": "Relative Humidity",
+            "data_key": "realtime_context.weather.relative_humidity_percent",
+            "weight": 0.05,
+            "type": "numerical_threshold",
+            "direction": "descending",
+            "mapping": {
+                "30": 10.0, "45": 8.0, "60": 5.0, "80": 3.0, "100": 1.0
+            }
+        },
+        {
+            "name": "Wind Speed",
+            "data_key": "realtime_context.weather.wind_speed_kmh",
+            "weight": 0.05,
+            "type": "numerical_threshold",
+            "direction": "ascending",
+            "mapping": {
+                "10": 1.0, "20": 3.0, "35": 7.0, "50": 10.0
+            }
+        }
+    ]
+}
 </file>
 
-<file path="fire_detection_model.py">
-# src/ml_model/fire_detection_model.py
+<file path="Dockerfile.debug">
+# Use a standard Python base image that matches the cloud environment
+FROM python:3.11-slim
 
-import torch
-import torch.nn as nn
-from torchvision.transforms import Compose, Resize, ToTensor, Normalize
+# Set a working directory inside the container
+WORKDIR /app
 
-class DummyFireDetectionModel(nn.Module):
-    """
-    A dummy PyTorch model for wildfire detection.
-    For MVP, it simply acts as a placeholder and always returns a predefined "detected" state.
-    In a real scenario, this would be a trained Convolutional Neural Network (CNN).
-    """
-    def __init__(self):
-        super(DummyFireDetectionModel, self).__init__()
-        # For a real model, you'd define your layers here, e.g.:
-        # self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1)
-        # self.relu = nn.ReLU()
-        # self.pool = nn.MaxPool2d(2)
-        # self.fc = nn.Linear(..., 2) # e.g., for binary classification (fire/no-fire)
+# Copy and install requirements first. This is where many errors happen.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-        # We'll use a placeholder parameter so TorchServe finds something to load
-        self.dummy_param = nn.Parameter(torch.randn(1))
+# Copy the rest of the model's code into the container
+COPY . .
 
-    def forward(self, x):
-        """
-        Forward pass for the dummy model.
-        In a real model, x would be an image tensor, and you'd pass it through your layers.
-        For this dummy, we ignore the input and return a fixed output.
-        """
-        # For MVP, simulate a fixed output: assume fire detected with 85% confidence
-        # Real model would output logits or probabilities, e.g., torch.tensor([[0.15, 0.85]])
-        return torch.tensor([[0.15, 0.85]]) # [no_fire_prob, fire_prob]
-
-# Define a transformation pipeline that mimics what a real model would need for input.
-# This will be used in the handler's preprocess method.
-# Assuming input images are 224x224 RGB for a typical CNN.
-MODEL_INPUT_TRANSFORMS = Compose([
-    Resize((224, 224)),       # Resize to expected input size
-    ToTensor(),               # Convert PIL Image to PyTorch Tensor (HWC to CHW, 0-255 to 0-1)
-    Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # ImageNet normalization (common)
-])
-
-if __name__ == '__main__':
-    # Simple test of the dummy model
-    model = DummyFireDetectionModel()
-    dummy_input = torch.randn(1, 3, 224, 224) # Batch size 1, 3 channels, 224x224 image
-    output = model(dummy_input)
-    print("Dummy Model Output (logits/probabilities):", output)
-    # Convert logits/probabilities to predicted class (0 for no fire, 1 for fire)
-    predicted_class = torch.argmax(output, dim=1).item()
-    confidence = output.softmax(dim=1)[0][predicted_class].item()
-    print(f"Predicted Class: {'Fire' if predicted_class == 1 else 'No Fire'} (Confidence: {confidence:.2f})")
-
-    # Save a dummy state_dict for packaging
-    dummy_model_path = "dummy_fire_detection_model.pth"
-    torch.save(model.state_dict(), dummy_model_path)
-    print(f"Dummy model state_dict saved to {dummy_model_path}")
+# A placeholder command to indicate the build can finish
+CMD ["echo", "Build successful"]
 </file>
 
-<file path="handler.py">
-# src/ml_model/handler.py
-
-import os
-import io
-import logging
+<file path="fully_offline.py">
 import json
-import torch
-import torch.nn.functional as F
-from PIL import Image
-from google.cloud import storage
-from ts.torch_handler.base_handler import BaseHandler
-from datetime import datetime
+from google.cloud.aiplatform.prediction import LocalModel
+from predictor import WildfireHeuristicPredictor
 
-# Import the model definition and transforms
-from fire_detection_model import DummyFireDetectionModel, MODEL_INPUT_TRANSFORMS
+print("--- Building local model for OFFLINE container testing ---")
 
-# --- Logging Setup ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# 1. Build the local model object. This inspects your code and prepares it.
+#    We use a 'local-test' tag to avoid confusion with the real deployed image.
+local_model = LocalModel.build_cpr_model(
+    ".",
+    "asia-southeast2-docker.pkg.dev/haryo-kebakaran/wildfire-detector-repo/wildfire-heuristic-predictor:local-test",
+    predictor=WildfireHeuristicPredictor,
+    requirements_path="requirements.txt"
+)
 
-def _log_json(severity: str, message: str, **kwargs):
-    log_entry = {
-        "severity": severity.upper(),
-        "message": message,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "component": "TorchServeHandler",
-        **kwargs
-    }
-    print(json.dumps(log_entry))
+print("\n--- Deploying to local Docker endpoint. This may take a moment... ---")
 
-
-class FireDetectionHandler(BaseHandler):
-    def __init__(self):
-        super().__init__()
-        self.initialized = False
-        self.storage_client = None
-        _log_json("INFO", "FireDetectionHandler instance created.")
-
-    def initialize(self, context):
-        properties = context.system_properties
-        model_dir = properties.get("model_dir")
-        self.device = torch.device("cuda" if torch.cuda.is_available() and properties.get("gpu_id") is not None else "cpu")
-
-        _log_json("INFO", f"Initializing handler on device: {self.device}")
-
-        self.model = DummyFireDetectionModel()
-        model_pt_path = os.path.join(model_dir, "model.pth")
-        if not os.path.exists(model_pt_path):
-            _log_json("ERROR", f"Model state_dict not found at: {model_pt_path}")
-            raise FileNotFoundError(f"Missing model state_dict: {model_pt_path}")
-
-        try:
-            self.model.load_state_dict(torch.load(model_pt_path, map_location=self.device))
-            self.model.to(self.device)
-            self.model.eval()
-            _log_json("INFO", "Model loaded successfully.", model_path=model_pt_path, device=str(self.device))
-        except Exception as e:
-            _log_json("CRITICAL", f"Failed to load model state_dict: {e}", model_path=model_pt_path)
-            raise RuntimeError(f"Failed to load model: {e}")
-
-        try:
-            self.storage_client = storage.Client()
-            _log_json("INFO", "Google Cloud Storage client initialized.")
-        except Exception as e:
-            _log_json("CRITICAL", f"Failed to initialize GCS client: {e}")
-            raise RuntimeError(f"Failed to initialize GCS client: {e}")
-
-        self.initialized = True
-        _log_json("INFO", "FireDetectionHandler initialization complete.")
-
-    def preprocess(self, data: list) -> tuple[list[torch.Tensor | None], list[dict]]:
-        _log_json("INFO", f"Starting preprocessing for {len(data)} instances.")
-        
-        processed_tensors = []
-        instance_metadata_list = [] 
-
-        for i, row in enumerate(data):
-            original_input_data = {} 
-            current_instance_id_for_log = f"instance_{i}_parsing_failed" # Default if parsing row fails
-
-            try:
-                if isinstance(row, dict) and 'data' in row and isinstance(row['data'], bytes):
-                    input_data = json.loads(row['data'].decode('utf-8'))
-                    original_input_data = input_data 
-                elif isinstance(row, dict):
-                    input_data = row
-                    original_input_data = row 
-                else:
-                    err_msg = f"Unexpected input data format for instance {i}."
-                    _log_json("ERROR", err_msg, input_type=type(row), input_snippet=str(row)[:100])
-                    processed_tensors.append(None) 
-                    instance_metadata_list.append({"instance_id": current_instance_id_for_log, "preprocess_error": err_msg})
-                    continue
-                
-                # Successfully parsed row, now store metadata and get instance_id
-                instance_metadata_list.append(original_input_data)
-                current_instance_id_for_log = original_input_data.get("instance_id", f"instance_{i}")
-
-                gcs_image_uri = input_data.get("gcs_image_uri")
-                if not gcs_image_uri:
-                    err_msg = f"Missing 'gcs_image_uri' for instance {current_instance_id_for_log}."
-                    _log_json("ERROR", err_msg, instance_id=current_instance_id_for_log)
-                    processed_tensors.append(None) 
-                    instance_metadata_list[-1]["preprocess_error"] = err_msg # Add error to last appended metadata
-                    continue
-
-                _log_json("INFO", f"Downloading image from GCS.", instance_id=current_instance_id_for_log, uri=gcs_image_uri)
-                parts = gcs_image_uri.replace("gs://", "").split("/", 1)
-                if len(parts) < 2:
-                    err_msg = f"Invalid GCS URI format: {gcs_image_uri}."
-                    _log_json("ERROR", err_msg, instance_id=current_instance_id_for_log)
-                    processed_tensors.append(None)
-                    instance_metadata_list[-1]["preprocess_error"] = err_msg
-                    continue
-                
-                bucket_name, blob_name = parts[0], parts[1]
-                bucket = self.storage_client.bucket(bucket_name)
-                blob = bucket.blob(blob_name)
-
-                if not blob.exists():
-                    err_msg = f"GCS image blob does not exist: {gcs_image_uri}."
-                    _log_json("ERROR", err_msg, instance_id=current_instance_id_for_log)
-                    processed_tensors.append(None)
-                    instance_metadata_list[-1]["preprocess_error"] = err_msg
-                    continue
-
-                image_bytes = blob.download_as_bytes()
-                image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-                transformed_image = MODEL_INPUT_TRANSFORMS(image)
-                processed_tensors.append(transformed_image)
-                _log_json("INFO", "Image preprocessed successfully.", instance_id=current_instance_id_for_log, uri=gcs_image_uri)
-
-            except Exception as e:
-                # This catches errors during parsing row, GCS ops, or image transformation
-                err_msg = f"Error preprocessing instance {current_instance_id_for_log}: {str(e)}"
-                _log_json("ERROR", err_msg, original_input_snippet=str(row)[:200], error_type=type(e).__name__)
-                processed_tensors.append(None)
-                # If metadata wasn't appended due to early failure (e.g. row parsing), append it now with error
-                if len(instance_metadata_list) == len(processed_tensors) -1: # Check if metadata for this item is missing
-                    instance_metadata_list.append({"instance_id": current_instance_id_for_log, "preprocess_error": err_msg})
-                else: # Metadata was already appended, just add/update the error
-                    instance_metadata_list[-1]["preprocess_error"] = err_msg
-        
-        # Ensure lists are of same length before returning (should be by construction)
-        if len(processed_tensors) != len(instance_metadata_list):
-            _log_json("CRITICAL", "Mismatch in lengths of processed_tensors and instance_metadata_list.",
-                      len_tensors=len(processed_tensors), len_metadata=len(instance_metadata_list))
-            # Fallback: Pad metadata if necessary, though this indicates a logic error above.
-            while len(instance_metadata_list) < len(processed_tensors):
-                instance_metadata_list.append({"instance_id": "fallback_meta_error", "preprocess_error": "Metadata list padding"})
-
-
-        return processed_tensors, instance_metadata_list
-
-    def inference(self, handler_input: tuple[list[torch.Tensor | None], list[dict]]) -> tuple[list[torch.Tensor | None], list[dict]]:
-        processed_tensors, instance_metadata_list = handler_input
-        _log_json("INFO", f"Starting inference for {len(processed_tensors)} total instances.")
-
-        valid_tensors = []
-        valid_indices = []
-        for i, tensor_data in enumerate(processed_tensors):
-            if tensor_data is not None:
-                valid_tensors.append(tensor_data)
-                valid_indices.append(i)
-
-        inference_results_for_valid_inputs = []
-        if valid_tensors:
-            batch_to_infer = torch.stack(valid_tensors).to(self.device)
-            _log_json("INFO", f"Performing inference on a batch of {batch_to_infer.shape[0]} valid instances.")
-            with torch.no_grad():
-                inference_results_for_valid_inputs = self.model(batch_to_infer)
-            _log_json("INFO", "Inference complete for valid instances.")
-        else:
-            _log_json("INFO", "No valid instances to perform inference on.")
-
-        all_inference_outputs = [None] * len(processed_tensors)
-        for i, result_tensor in enumerate(inference_results_for_valid_inputs):
-            original_index = valid_indices[i]
-            all_inference_outputs[original_index] = result_tensor
-        
-        return all_inference_outputs, instance_metadata_list
-
-    def postprocess(self, handler_output: tuple[list[torch.Tensor | None], list[dict]]) -> list[dict[str, any]]:
-        all_inference_outputs, instance_metadata_list = handler_output
-        _log_json("INFO", f"Starting postprocessing for {len(all_inference_outputs)} total instances.")
-        
-        results = []
-
-        for i in range(len(all_inference_outputs)):
-            inference_output_tensor = all_inference_outputs[i]
-            # Ensure metadata list is not shorter than output list (should not happen with current logic)
-            if i >= len(instance_metadata_list):
-                _log_json("ERROR", "Metadata list shorter than inference output list during postprocessing.",
-                          index=i, len_metadata=len(instance_metadata_list), len_outputs=len(all_inference_outputs))
-                # Create a fallback metadata to avoid crashing
-                metadata = {"instance_id": f"missing_metadata_instance_{i}", 
-                            "error": "Metadata missing for this instance in postprocess"}
-            else:
-                metadata = instance_metadata_list[i]
-            
-            instance_id = metadata.get("instance_id", f"processed_instance_{i}") 
-
-            if inference_output_tensor is None:
-                error_message = metadata.get("preprocess_error", "Processing failed (reason unknown or occurred during inference step for valid preprocess)")
-                
-                results.append({
-                    "instance_id": instance_id,
-                    "detected": False, 
-                    "confidence": 0.0,
-                    "detection_details": "Error during processing.",
-                    "error_message": error_message 
-                })
-                _log_json("WARNING", "Instance failed processing.", instance_id=instance_id, error=error_message)
-            else:
-                probabilities = F.softmax(inference_output_tensor.unsqueeze(0), dim=1) 
-                predicted_class = torch.argmax(probabilities, dim=1).item()
-                
-                is_detected = (predicted_class == 1)
-                confidence = probabilities[0][predicted_class].item()
-
-                results.append({
-                    "instance_id": instance_id,
-                    "detected": bool(is_detected),
-                    "confidence": float(confidence),
-                    "detection_details": "Fire detected by AI model" if is_detected else "No fire detected by AI model",
-                    "error_message": None
-                })
-        
-        _log_json("INFO", "Postprocessing complete.", total_results_generated=len(results))
-        return results
-
-# --- Example Usage (for local testing of handler methods, not full TorchServe) ---
-if __name__ == '__main__':
-    from src.common.config import GCS_BUCKET_NAME 
-
-    _log_json("INFO", "Running local handler test (partial - requires GCS setup and model file).")
-
-    class MockContext:
-        def __init__(self, model_dir, gpu_id=None):
-            self.system_properties = {"model_dir": model_dir, "gpu_id": gpu_id}
-            self.manifest = {"model": {"modelName": "model"}}
-
-    if not os.path.exists("model_artifacts"):
-        os.makedirs("model_artifacts")
+# 2. This 'with' block starts the Docker container, runs the test, and automatically cleans up.
+with local_model.deploy_to_local_endpoint(
+    # The container needs access to the data file you downloaded.
+    # We mount the current directory into the container's /data directory.
+    host_port=8080, # Expose the container's port to your machine's port 8080
+) as local_endpoint:
     
-    dummy_model_for_test = DummyFireDetectionModel()
-    torch.save(dummy_model_for_test.state_dict(), os.path.join("model_artifacts", "model.pth"))
-    _log_json("INFO", "Dummy model file 'model.pth' created for local handler test.")
+    print("Endpoint is live on local Docker. Sending prediction request...")
 
-    mock_context = MockContext("model_artifacts")
-
-    handler = FireDetectionHandler()
+    # 3. Send the local data file to the local container for prediction.
     try:
-        handler.initialize(mock_context)
+        predict_response = local_endpoint.predict(
+            request_file="incidents.jsonl",  # The file we downloaded in Step 1
+            headers={"Content-Type": "application/json"},
+        )
 
-        valid_gcs_uri = f"gs://{GCS_BUCKET_NAME}/raw_satellite_imagery/test_image_valid.png" 
-        invalid_gcs_uri = f"gs://{GCS_BUCKET_NAME}/raw_satellite_imagery/non_existent_image.png"
-        malformed_gcs_uri = "gs:/malformed/uri"
-        missing_uri_input = {"instance_id": "test_instance_4_missing_uri", "region_metadata": {"id": "test_region_4"}}
+        print("\n--- ✅ Prediction Successful ---")
+        print("\n--- Parsed Predictions ---")
         
-        dummy_local_image_path = "dummy_handler_test_image.png"
-        if not os.path.exists(dummy_local_image_path):
-            Image.new('RGB', (224, 224), color = 'green').save(dummy_local_image_path)
-            _log_json("INFO", f"Created dummy local image for GCS upload test: {dummy_local_image_path}")
+        # Decode the raw byte content of the response
+        response_content = predict_response.content.decode('utf-8')
         
-        try:
-            if GCS_BUCKET_NAME != "fire-app-bucket":
-                 _log_json("WARNING", f"GCS_BUCKET_NAME '{GCS_BUCKET_NAME}' might not be intended for this test. Skipping GCS upload.")
-            else:
-                storage_client_test = storage.Client()
-                bucket_test = storage_client_test.bucket(GCS_BUCKET_NAME)
-                blob_test = bucket_test.blob(valid_gcs_uri.replace(f"gs://{GCS_BUCKET_NAME}/", ""))
-                if not blob_test.exists():
-                    blob_test.upload_from_filename(dummy_local_image_path)
-                    _log_json("INFO", f"Uploaded {dummy_local_image_path} to {valid_gcs_uri} for testing.")
-                else:
-                    _log_json("INFO", f"Test image {valid_gcs_uri} already exists in GCS.")
-        except Exception as e:
-            _log_json("WARNING", f"Could not ensure test image exists at {valid_gcs_uri} due to: {e}. GCS test case might fail.")
-
-        input_batch_for_preprocess = [
-            {"instance_id": "test_instance_1_valid", "gcs_image_uri": valid_gcs_uri, "region_metadata": {"id": "test_region_1"}},
-            {"instance_id": "test_instance_2_invalid_uri", "gcs_image_uri": invalid_gcs_uri, "region_metadata": {"id": "test_region_2"}},
-            {"instance_id": "test_instance_3_malformed_uri", "gcs_image_uri": malformed_gcs_uri, "region_metadata": {"id": "test_region_3"}},
-            missing_uri_input,
-            {"instance_id": "test_instance_5_another_valid", "gcs_image_uri": valid_gcs_uri, "region_metadata": {"id": "test_region_5"}} 
-        ]
+        # The result is a single JSON object with a 'predictions' key
+        all_predictions = json.loads(response_content)['predictions']
         
-        _log_json("INFO", "--- Testing Preprocess ---")
-        processed_tensors, metadata_list = handler.preprocess(input_batch_for_preprocess)
-        
-        for i, tensor in enumerate(processed_tensors):
-            meta = metadata_list[i] if i < len(metadata_list) else {"instance_id": "error_meta_missing", "preprocess_error": "Metadata missing"}
-            status = "Success" if tensor is not None else f"Failure ({meta.get('preprocess_error', 'Unknown preprocess error')})"
-            _log_json("INFO", f"Preprocess instance {meta.get('instance_id')}: {status}")
-
-        _log_json("INFO", "--- Testing Inference ---")
-        inference_outputs, final_metadata_list = handler.inference((processed_tensors, metadata_list))
-
-        _log_json("INFO", "--- Testing Postprocess ---")
-        final_results = handler.postprocess((inference_outputs, final_metadata_list))
-        
-        _log_json("INFO", "Final batch results (should include errors for failed instances):")
-        for res_idx, res_item in enumerate(final_results): # Changed variable name from res to res_item
-            print(f"Result for instance {res_idx}: {json.dumps(res_item, indent=2)}") # Added index for clarity
+        for prediction in all_predictions:
+            instance_id = prediction['instance_id']
+            score = prediction['confidence_score']
+            print(f"  Cluster ID: {instance_id}, Predicted Risk Score: {score:.4f}")
 
     except Exception as e:
-        _log_json("CRITICAL", f"Unhandled error during handler local test: {e}", error_details=str(e))
-        import traceback
-        traceback.print_exc()
+        print(f"\n--- ❌ Prediction Failed ---")
+        print(f"Error: {e}")
+        print("\n--- Printing container logs for debugging ---")
+        local_endpoint.print_container_logs()
+
+
+print("\n--- Local endpoint has been shut down. Test complete. ---")
+</file>
+
+<file path="incidents.jsonl">
+{
+  "cluster_id": "fire_cluster_20190921_0",
+  "point_count": 34,
+  "centroid_latitude": -1.504118,
+  "centroid_longitude": 103.992353,
+  "detected_by": [
+    "JAXA"
+  ],
+  "first_detected_utc": "2019-09-21T00:00:00+00:00",
+  "last_detected_utc": "2019-09-21T00:00:00+00:00",
+  "realtime_context": {
+    "weather": {
+      "timestamp_utc": "2019-09-21T00:00:00+00:00",
+      "temperature_celsius": 24.39,
+      "relative_humidity_percent": 86.76,
+      "dew_point_celsius": 22.04,
+      "precipitation_mm": 0.0,
+      "wind_speed_kmh": 7.9,
+      "wind_direction_deg": 155.77,
+      "wind_gusts_kmh": 18.72
+    },
+    "air_quality": {
+      "measurements": {
+        "CO": {
+          "status": "success",
+          "value": 166040.8,
+          "unit": "\u00b5mol/m\u00b2"
+        },
+        "AEROSOL": {
+          "status": "success",
+          "value": 1.47,
+          "unit": "index"
+        },
+        "NO2": {
+          "status": "success",
+          "value": 20.22,
+          "unit": "\u00b5mol/m\u00b2"
+        }
+      },
+      "fire_indicators": [
+        {
+          "product": "CO",
+          "severity": "severe",
+          "value": 166040.79561653957,
+          "message": "Carbon Monoxide severely elevated"
+        },
+        {
+          "product": "AEROSOL",
+          "severity": "moderate",
+          "value": 1.4739731229153312,
+          "message": "Aerosol Index moderately elevated"
+        },
+        {
+          "product": "NO2",
+          "severity": "moderate",
+          "value": 20.2233971008969,
+          "message": "Nitrogen Dioxide moderately elevated"
+        }
+      ],
+      "air_quality_severity": "severe"
+    }
+  },
+  "fire_severity_assessment": {
+    "overall_severity": "severe",
+    "severity_score": 6,
+    "contributing_factors": [
+      "High hotspot density (>=15)",
+      "Severe air quality impact"
+    ],
+    "details": {
+      "hotspot_count": 34,
+      "weather_severity": "low",
+      "air_quality_severity": "severe"
+    }
+  },
+  "hotspots": [
+    {
+      "id": "5788",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.44,
+        "longitude": 103.98,
+        "frp_mean": 454.39,
+        "frp_max": 2515.91,
+        "n_detections": 74,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.98,
+          -1.44
+        ]
+      }
+    },
+    {
+      "id": "5789",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.44,
+        "longitude": 104.0,
+        "frp_mean": 923.1,
+        "frp_max": 3284.61,
+        "n_detections": 76,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.0,
+          -1.44
+        ]
+      }
+    },
+    {
+      "id": "5797",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.46,
+        "longitude": 103.96,
+        "frp_mean": 70.59,
+        "frp_max": 70.59,
+        "n_detections": 1,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1228,
+        "objectid_1": 1229,
+        "objectid": 1710,
+        "layer_revi": "gambut",
+        "shape_leng": 108377.618572,
+        "globalid": "{02705CDB-9D82-49E9-9FB1-71BF19FD36D8}",
+        "shape_Le_1": 109845.12218438149,
+        "shape_Area": 383248267.1785685,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.96,
+          -1.46
+        ]
+      }
+    },
+    {
+      "id": "5798",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.46,
+        "longitude": 103.98,
+        "frp_mean": 809.36,
+        "frp_max": 2761.41,
+        "n_detections": 71,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.98,
+          -1.46
+        ]
+      }
+    },
+    {
+      "id": "5799",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.46,
+        "longitude": 104.0,
+        "frp_mean": 1568.65,
+        "frp_max": 3539.6,
+        "n_detections": 81,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.0,
+          -1.46
+        ]
+      }
+    },
+    {
+      "id": "5800",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.46,
+        "longitude": 104.02,
+        "frp_mean": 1196.42,
+        "frp_max": 3677.01,
+        "n_detections": 77,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.02,
+          -1.46
+        ]
+      }
+    },
+    {
+      "id": "5801",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.46,
+        "longitude": 104.04,
+        "frp_mean": 1195.97,
+        "frp_max": 3676.86,
+        "n_detections": 77,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.04,
+          -1.46
+        ]
+      }
+    },
+    {
+      "id": "5812",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.48,
+        "longitude": 103.94,
+        "frp_mean": 11.58,
+        "frp_max": 12.13,
+        "n_detections": 2,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1228,
+        "objectid_1": 1229,
+        "objectid": 1710,
+        "layer_revi": "gambut",
+        "shape_leng": 108377.618572,
+        "globalid": "{02705CDB-9D82-49E9-9FB1-71BF19FD36D8}",
+        "shape_Le_1": 109845.12218438149,
+        "shape_Area": 383248267.1785685,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.94,
+          -1.48
+        ]
+      }
+    },
+    {
+      "id": "5813",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.48,
+        "longitude": 103.96,
+        "frp_mean": 42.09,
+        "frp_max": 78.85,
+        "n_detections": 3,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.96,
+          -1.48
+        ]
+      }
+    },
+    {
+      "id": "5814",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.48,
+        "longitude": 103.98,
+        "frp_mean": 359.9,
+        "frp_max": 1196.17,
+        "n_detections": 42,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.98,
+          -1.48
+        ]
+      }
+    },
+    {
+      "id": "5815",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.48,
+        "longitude": 104.0,
+        "frp_mean": 801.45,
+        "frp_max": 2454.11,
+        "n_detections": 75,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.0,
+          -1.48
+        ]
+      }
+    },
+    {
+      "id": "5816",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.48,
+        "longitude": 104.02,
+        "frp_mean": 704.74,
+        "frp_max": 2242.5,
+        "n_detections": 85,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.02,
+          -1.48
+        ]
+      }
+    },
+    {
+      "id": "5817",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.48,
+        "longitude": 104.04,
+        "frp_mean": 704.56,
+        "frp_max": 2242.4,
+        "n_detections": 85,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.04,
+          -1.48
+        ]
+      }
+    },
+    {
+      "id": "5831",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.5,
+        "longitude": 103.94,
+        "frp_mean": 10.4,
+        "frp_max": 10.4,
+        "n_detections": 1,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.94,
+          -1.5
+        ]
+      }
+    },
+    {
+      "id": "5832",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.5,
+        "longitude": 103.96,
+        "frp_mean": 20.99,
+        "frp_max": 20.99,
+        "n_detections": 1,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.96,
+          -1.5
+        ]
+      }
+    },
+    {
+      "id": "5833",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.5,
+        "longitude": 103.98,
+        "frp_mean": 63.94,
+        "frp_max": 187.7,
+        "n_detections": 8,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.98,
+          -1.5
+        ]
+      }
+    },
+    {
+      "id": "5834",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.5,
+        "longitude": 104.0,
+        "frp_mean": 114.81,
+        "frp_max": 498.42,
+        "n_detections": 49,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.0,
+          -1.5
+        ]
+      }
+    },
+    {
+      "id": "5835",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.5,
+        "longitude": 104.02,
+        "frp_mean": 258.96,
+        "frp_max": 897.88,
+        "n_detections": 42,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.02,
+          -1.5
+        ]
+      }
+    },
+    {
+      "id": "5836",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.5,
+        "longitude": 104.04,
+        "frp_mean": 258.92,
+        "frp_max": 897.88,
+        "n_detections": 42,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.04,
+          -1.5
+        ]
+      }
+    },
+    {
+      "id": "5844",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.52,
+        "longitude": 103.94,
+        "frp_mean": 18.57,
+        "frp_max": 23.07,
+        "n_detections": 5,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.94,
+          -1.52
+        ]
+      }
+    },
+    {
+      "id": "5845",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.52,
+        "longitude": 103.98,
+        "frp_mean": 31.75,
+        "frp_max": 54.0,
+        "n_detections": 7,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.98,
+          -1.52
+        ]
+      }
+    },
+    {
+      "id": "5846",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.52,
+        "longitude": 104.0,
+        "frp_mean": 70.2,
+        "frp_max": 326.7,
+        "n_detections": 37,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.0,
+          -1.52
+        ]
+      }
+    },
+    {
+      "id": "5847",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.52,
+        "longitude": 104.02,
+        "frp_mean": 97.44,
+        "frp_max": 230.03,
+        "n_detections": 61,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.02,
+          -1.52
+        ]
+      }
+    },
+    {
+      "id": "5848",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.52,
+        "longitude": 104.04,
+        "frp_mean": 97.43,
+        "frp_max": 229.48,
+        "n_detections": 61,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.04,
+          -1.52
+        ]
+      }
+    },
+    {
+      "id": "5857",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.54,
+        "longitude": 103.94,
+        "frp_mean": 171.73,
+        "frp_max": 760.91,
+        "n_detections": 13,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.94,
+          -1.54
+        ]
+      }
+    },
+    {
+      "id": "5858",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.54,
+        "longitude": 103.96,
+        "frp_mean": 171.73,
+        "frp_max": 760.86,
+        "n_detections": 13,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.96,
+          -1.54
+        ]
+      }
+    },
+    {
+      "id": "5859",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.54,
+        "longitude": 103.98,
+        "frp_mean": 147.25,
+        "frp_max": 479.31,
+        "n_detections": 4,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.98,
+          -1.54
+        ]
+      }
+    },
+    {
+      "id": "5860",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.54,
+        "longitude": 104.0,
+        "frp_mean": 41.78,
+        "frp_max": 41.78,
+        "n_detections": 1,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.0,
+          -1.54
+        ]
+      }
+    },
+    {
+      "id": "5861",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.54,
+        "longitude": 104.02,
+        "frp_mean": 58.66,
+        "frp_max": 140.58,
+        "n_detections": 39,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.02,
+          -1.54
+        ]
+      }
+    },
+    {
+      "id": "5862",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.54,
+        "longitude": 104.04,
+        "frp_mean": 56.93,
+        "frp_max": 140.58,
+        "n_detections": 41,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.04,
+          -1.54
+        ]
+      }
+    },
+    {
+      "id": "5874",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.56,
+        "longitude": 103.96,
+        "frp_mean": 1210.24,
+        "frp_max": 2821.0,
+        "n_detections": 57,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.96,
+          -1.56
+        ]
+      }
+    },
+    {
+      "id": "5875",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.56,
+        "longitude": 103.98,
+        "frp_mean": 802.65,
+        "frp_max": 2160.18,
+        "n_detections": 5,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          103.98,
+          -1.56
+        ]
+      }
+    },
+    {
+      "id": "5876",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.56,
+        "longitude": 104.0,
+        "frp_mean": 70.89,
+        "frp_max": 187.46,
+        "n_detections": 53,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.0,
+          -1.56
+        ]
+      }
+    },
+    {
+      "id": "5877",
+      "type": "Feature",
+      "properties": {
+        "year": 2019,
+        "month": 9,
+        "day": 21,
+        "latitude": -1.56,
+        "longitude": 104.02,
+        "frp_mean": 63.5,
+        "frp_max": 110.58,
+        "n_detections": 25,
+        "acq_datetime": "2019-09-21 00:00:00+00:00",
+        "source": "JAXA",
+        "index_right": 1265,
+        "objectid_1": 1266,
+        "objectid": 1747,
+        "layer_revi": "gambut",
+        "shape_leng": 429079.260415,
+        "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}",
+        "shape_Le_1": 427203.8494205073,
+        "shape_Area": 2683153680.2708316,
+        "cluster_id": 0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          104.02,
+          -1.56
+        ]
+      }
+    }
+  ]
+}
+</file>
+
+<file path="predictor.py">
+import os
+import json
+import numpy as np
+from typing import Any, Dict, List
+
+from google.cloud.aiplatform.prediction.predictor import Predictor
+
+# --- Heuristic Model Logic (This class remains correct) ---
+class FireRiskHeuristicModel:
+    def __init__(self, config: Dict[str, Any]):
+        if 'criteria' not in config or not isinstance(config['criteria'], list):
+            raise ValueError("Configuration must contain a 'criteria' list.")
+        self.criteria: List[Dict[str, Any]] = config['criteria']
+        self._validate_config()
+
+    def _validate_config(self):
+        total_weight = sum(c['weight'] for c in self.criteria)
+        if not np.isclose(total_weight, 1.0):
+            raise ValueError(f"Sum of all weights must be 1.0, but is {total_weight}")
+
+    def _sigmoid(self, x: float) -> float:
+        return 1 / (1 + np.exp(-x))
+
+    def _get_value_from_dot_key(self, data: Dict[str, Any], key: str) -> Any:
+        keys = key.split('.')
+        value = data
+        for k in keys:
+            if isinstance(value, dict) and k in value:
+                value = value[k]
+            else: return None
+        return value
+
+    def _get_criterion_score(self, criterion: Dict[str, Any], data: Dict[str, Any]) -> float:
+        data_key = criterion['data_key']
+        value = self._get_value_from_dot_key(data, data_key)
+
+        if value is None: return 5.0
+
+        if criterion['type'] == 'categorical':
+            return float(criterion['mapping'].get(str(value).lower(), 5.0))
+        
+        elif criterion['type'] == 'numerical_threshold':
+            direction = criterion.get("direction", "ascending")
+            sorted_thresholds = sorted(criterion['mapping'].items(), key=lambda item: float(item[0]))
+            for threshold, score in sorted_thresholds:
+                if float(value) <= float(threshold): return float(score)
+            if direction == "ascending": return float(max(criterion['mapping'].values()))
+            else: return float(min(criterion['mapping'].values()))
+        else:
+            raise ValueError(f"Unsupported criterion type: {criterion['type']}")
+
+    def _calculate_raw_score(self, data: Dict[str, Any]) -> float:
+        total_raw_score = sum(self._get_criterion_score(c, data) * c['weight'] for c in self.criteria)
+        return total_raw_score - 5.0
+
+    def predict_confidence(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        raw_score = self._calculate_raw_score(data)
+        confidence_score = self._sigmoid(raw_score)
+        return {"confidence_score": confidence_score, "raw_score": raw_score}
+
+
+# --- CPR Predictor Class ---
+class WildfireHeuristicPredictor(Predictor):
+    def __init__(self):
+        self._model = None
+
+    def load(self, artifacts_uri: str) -> None:
+        config_path = os.path.join(artifacts_uri, "config.json")
+        if not os.path.exists(config_path):
+             config_path = "config.json"
+        with open(config_path, 'r') as f:
+            model_config = json.load(f)
+        self._model = FireRiskHeuristicModel(config=model_config)
+
+    # --- THIS IS THE CORRECTED PREPROCESS METHOD ---
+    def preprocess(self, prediction_input: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Pre-processes the input by calculating derived values needed by the model.
+        This is where all data preparation logic should live.
+        """
+        processed_instances = []
+        for instance in prediction_input["instances"]:
+            # Calculate the average Fire Radiative Power (FRP)
+            hotspots = instance.get("hotspots", [])
+            if hotspots:
+                frp_values = [h['properties']['frp_mean'] for h in hotspots if 'frp_mean' in h.get('properties', {})]
+                avg_frp = np.mean(frp_values) if frp_values else 0
+            else:
+                avg_frp = 0
+            
+            # Add the newly calculated value to the instance for the model to use
+            instance['avg_frp'] = avg_frp
+            processed_instances.append(instance)
+            
+        return processed_instances
+    # --- END OF CORRECTION ---
+
+    def predict(self, instances: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        predictions = []
+        for instance in instances:
+            cluster_id = instance.get("cluster_id", "unknown_instance")
+            result = self._model.predict_confidence(instance)
+            result["instance_id"] = cluster_id
+            predictions.append(result)
+        return predictions
+
+    def postprocess(self, prediction_results: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        return {"predictions": prediction_results}
 </file>
 
 <file path="register_vertex_model.py">
-# register_vertex_model.py
-from google.cloud import aiplatform
+# src/ml_model/register_vertex_model.py
 import os
+from google.cloud import aiplatform
+# --- ADDED: Import the storage library ---
+from google.cloud import storage
+from google.cloud.aiplatform.prediction import LocalModel
 
+from predictor import WildfireHeuristicPredictor
+
+# --- Configuration (remains the same) ---
 PROJECT_ID = "haryo-kebakaran"
 REGION = "asia-southeast2"
-BUCKET_NAME = "fire-app-bucket"
+DOCKER_REPO_NAME = "wildfire-detector-repo"
+IMAGE_NAME = "wildfire-heuristic-predictor"
+IMAGE_URI = f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:latest"
 
-aiplatform.init(project=PROJECT_ID, location=REGION)
+GCS_ARTIFACT_DIRECTORY_NAME = "models/wildfire_heuristic_predictor_v1/"
+GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', 'fire-app-bucket')
+GCS_ARTIFACT_URI = f"gs://{GCS_BUCKET_NAME}/{GCS_ARTIFACT_DIRECTORY_NAME}"
 
-serving_container_image_uri = f"{REGION}-docker.pkg.dev/{PROJECT_ID}/wildfire-detector-ts/wildfire-detector-ts:latest"
-artifact_uri = f"gs://{BUCKET_NAME}/models/dummy_fire_detection/"
+MODEL_DISPLAY_NAME = "wildfire-heuristic-predictor-model"
 
-try:
-    print(f"Attempting to upload model '{PROJECT_ID}' in '{REGION}'...")
-    model = aiplatform.Model.upload(
-        display_name="dummy_wildfire_detector_v1",
-        artifact_uri=artifact_uri,
-        serving_container_image_uri=serving_container_image_uri,
-        serving_container_predict_route="/predictions/model",
-        serving_container_health_route="/ping"
+def main():
+    print("--- Starting HEURISTIC model registration process ---")
+
+    # ... (verification and build steps are the same)
+    print("Verifying 'config.json' exists for the build context...")
+    local_config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    if not os.path.exists(local_config_path):
+        print(f"CRITICAL: 'config.json' not found at {local_config_path}. Cannot build predictor.")
+        return
+    print("'config.json' found.")
+
+    print(f"--- Building Custom Prediction Routine container ---")
+    local_model = LocalModel.build_cpr_model(
+        ".",
+        IMAGE_URI,
+        predictor=WildfireHeuristicPredictor,
+        requirements_path="requirements.txt"
     )
-    model.wait()
-    print(f"Model uploaded successfully. Resource name: {model.resource_name}")
-    # IMPORTANT: Copy the NEW MODEL ID from the end of the 'resource_name' output.
-except Exception as e:
-    print(f"Error uploading model: {e}")
-    print("This might happen if the model with this display_name already exists.")
-    print("If it exists, check Vertex AI -> Models to get its ID, or increment version.")
+    local_model.get_serving_container_spec()
+
+    print("\n--- Pushing container image to Artifact Registry ---")
+    local_model.push_image()
+    print("--- Image pushed successfully ---")
+
+    # --- NEW STEP: Manually upload the config.json artifact before registering the model ---
+    print("\n--- Manually uploading artifacts to GCS ---")
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+    destination_blob_name = os.path.join(GCS_ARTIFACT_DIRECTORY_NAME, "config.json")
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_filename(local_config_path)
+    print(f"Successfully uploaded {local_config_path} to gs://{GCS_BUCKET_NAME}/{destination_blob_name}")
+    # ------------------------------------------------------------------------------------
+
+    print("\n--- Uploading model to Vertex AI Model Registry ---")
+    aiplatform.init(project=PROJECT_ID, location=REGION)
+    
+    model = aiplatform.Model.upload(
+        local_model=local_model,
+        display_name=MODEL_DISPLAY_NAME,
+        artifact_uri=GCS_ARTIFACT_URI,
+    )
+
+    print(f"\nModel registration for '{MODEL_DISPLAY_NAME}' submitted successfully.")
+    print(f"Resource name: {model.resource_name}")
+    
+    console_url = (
+        f"https://console.cloud.google.com/vertex-ai/locations/{REGION}/models/"
+        f"{model.name}?project={PROJECT_ID}"
+    )
+    print(f"View in console: {console_url}")
+
+if __name__ == "__main__":
+    main()
 </file>
 
 <file path="requirements.txt">
-# src/ml_model/requirements.txt (for both Dockerfile and .mar bundle)
+# src/ml_model/requirements.txt
 google-cloud-storage
-Pillow
+numpy
+</file>
+
+<file path="temp_request.json">
+{"instances": [{"cluster_id": "fire_cluster_20190921_0", "point_count": 34, "centroid_latitude": -1.504118, "centroid_longitude": 103.992353, "detected_by": ["JAXA"], "first_detected_utc": "2019-09-21T00:00:00+00:00", "last_detected_utc": "2019-09-21T00:00:00+00:00", "realtime_context": {"weather": {"timestamp_utc": "2019-09-21T00:00:00+00:00", "temperature_celsius": 24.39, "relative_humidity_percent": 86.76, "dew_point_celsius": 22.04, "precipitation_mm": 0.0, "wind_speed_kmh": 7.9, "wind_direction_deg": 155.77, "wind_gusts_kmh": 18.72}, "air_quality": {"measurements": {"CO": {"status": "success", "value": 166040.8, "unit": "\u00b5mol/m\u00b2"}, "AEROSOL": {"status": "success", "value": 1.47, "unit": "index"}, "NO2": {"status": "success", "value": 20.22, "unit": "\u00b5mol/m\u00b2"}}, "fire_indicators": [{"product": "CO", "severity": "severe", "value": 166040.79561653957, "message": "Carbon Monoxide severely elevated"}, {"product": "AEROSOL", "severity": "moderate", "value": 1.4739731229153312, "message": "Aerosol Index moderately elevated"}, {"product": "NO2", "severity": "moderate", "value": 20.2233971008969, "message": "Nitrogen Dioxide moderately elevated"}], "air_quality_severity": "severe"}}, "fire_severity_assessment": {"overall_severity": "severe", "severity_score": 6, "contributing_factors": ["High hotspot density (>=15)", "Severe air quality impact"], "details": {"hotspot_count": 34, "weather_severity": "low", "air_quality_severity": "severe"}}, "hotspots": [{"id": "5788", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.44, "longitude": 103.98, "frp_mean": 454.39, "frp_max": 2515.91, "n_detections": 74, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.98, -1.44]}}, {"id": "5789", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.44, "longitude": 104.0, "frp_mean": 923.1, "frp_max": 3284.61, "n_detections": 76, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.0, -1.44]}}, {"id": "5797", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.46, "longitude": 103.96, "frp_mean": 70.59, "frp_max": 70.59, "n_detections": 1, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1228, "objectid_1": 1229, "objectid": 1710, "layer_revi": "gambut", "shape_leng": 108377.618572, "globalid": "{02705CDB-9D82-49E9-9FB1-71BF19FD36D8}", "shape_Le_1": 109845.12218438149, "shape_Area": 383248267.1785685, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.96, -1.46]}}, {"id": "5798", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.46, "longitude": 103.98, "frp_mean": 809.36, "frp_max": 2761.41, "n_detections": 71, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.98, -1.46]}}, {"id": "5799", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.46, "longitude": 104.0, "frp_mean": 1568.65, "frp_max": 3539.6, "n_detections": 81, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.0, -1.46]}}, {"id": "5800", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.46, "longitude": 104.02, "frp_mean": 1196.42, "frp_max": 3677.01, "n_detections": 77, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.02, -1.46]}}, {"id": "5801", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.46, "longitude": 104.04, "frp_mean": 1195.97, "frp_max": 3676.86, "n_detections": 77, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.04, -1.46]}}, {"id": "5812", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.48, "longitude": 103.94, "frp_mean": 11.58, "frp_max": 12.13, "n_detections": 2, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1228, "objectid_1": 1229, "objectid": 1710, "layer_revi": "gambut", "shape_leng": 108377.618572, "globalid": "{02705CDB-9D82-49E9-9FB1-71BF19FD36D8}", "shape_Le_1": 109845.12218438149, "shape_Area": 383248267.1785685, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.94, -1.48]}}, {"id": "5813", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.48, "longitude": 103.96, "frp_mean": 42.09, "frp_max": 78.85, "n_detections": 3, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.96, -1.48]}}, {"id": "5814", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.48, "longitude": 103.98, "frp_mean": 359.9, "frp_max": 1196.17, "n_detections": 42, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.98, -1.48]}}, {"id": "5815", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.48, "longitude": 104.0, "frp_mean": 801.45, "frp_max": 2454.11, "n_detections": 75, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.0, -1.48]}}, {"id": "5816", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.48, "longitude": 104.02, "frp_mean": 704.74, "frp_max": 2242.5, "n_detections": 85, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.02, -1.48]}}, {"id": "5817", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.48, "longitude": 104.04, "frp_mean": 704.56, "frp_max": 2242.4, "n_detections": 85, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.04, -1.48]}}, {"id": "5831", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.5, "longitude": 103.94, "frp_mean": 10.4, "frp_max": 10.4, "n_detections": 1, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.94, -1.5]}}, {"id": "5832", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.5, "longitude": 103.96, "frp_mean": 20.99, "frp_max": 20.99, "n_detections": 1, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.96, -1.5]}}, {"id": "5833", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.5, "longitude": 103.98, "frp_mean": 63.94, "frp_max": 187.7, "n_detections": 8, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.98, -1.5]}}, {"id": "5834", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.5, "longitude": 104.0, "frp_mean": 114.81, "frp_max": 498.42, "n_detections": 49, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.0, -1.5]}}, {"id": "5835", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.5, "longitude": 104.02, "frp_mean": 258.96, "frp_max": 897.88, "n_detections": 42, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.02, -1.5]}}, {"id": "5836", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.5, "longitude": 104.04, "frp_mean": 258.92, "frp_max": 897.88, "n_detections": 42, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.04, -1.5]}}, {"id": "5844", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.52, "longitude": 103.94, "frp_mean": 18.57, "frp_max": 23.07, "n_detections": 5, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.94, -1.52]}}, {"id": "5845", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.52, "longitude": 103.98, "frp_mean": 31.75, "frp_max": 54.0, "n_detections": 7, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.98, -1.52]}}, {"id": "5846", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.52, "longitude": 104.0, "frp_mean": 70.2, "frp_max": 326.7, "n_detections": 37, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.0, -1.52]}}, {"id": "5847", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.52, "longitude": 104.02, "frp_mean": 97.44, "frp_max": 230.03, "n_detections": 61, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.02, -1.52]}}, {"id": "5848", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.52, "longitude": 104.04, "frp_mean": 97.43, "frp_max": 229.48, "n_detections": 61, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.04, -1.52]}}, {"id": "5857", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.54, "longitude": 103.94, "frp_mean": 171.73, "frp_max": 760.91, "n_detections": 13, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.94, -1.54]}}, {"id": "5858", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.54, "longitude": 103.96, "frp_mean": 171.73, "frp_max": 760.86, "n_detections": 13, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.96, -1.54]}}, {"id": "5859", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.54, "longitude": 103.98, "frp_mean": 147.25, "frp_max": 479.31, "n_detections": 4, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.98, -1.54]}}, {"id": "5860", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.54, "longitude": 104.0, "frp_mean": 41.78, "frp_max": 41.78, "n_detections": 1, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.0, -1.54]}}, {"id": "5861", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.54, "longitude": 104.02, "frp_mean": 58.66, "frp_max": 140.58, "n_detections": 39, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.02, -1.54]}}, {"id": "5862", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.54, "longitude": 104.04, "frp_mean": 56.93, "frp_max": 140.58, "n_detections": 41, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.04, -1.54]}}, {"id": "5874", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.56, "longitude": 103.96, "frp_mean": 1210.24, "frp_max": 2821.0, "n_detections": 57, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.96, -1.56]}}, {"id": "5875", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.56, "longitude": 103.98, "frp_mean": 802.65, "frp_max": 2160.18, "n_detections": 5, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [103.98, -1.56]}}, {"id": "5876", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.56, "longitude": 104.0, "frp_mean": 70.89, "frp_max": 187.46, "n_detections": 53, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.0, -1.56]}}, {"id": "5877", "type": "Feature", "properties": {"year": 2019, "month": 9, "day": 21, "latitude": -1.56, "longitude": 104.02, "frp_mean": 63.5, "frp_max": 110.58, "n_detections": 25, "acq_datetime": "2019-09-21 00:00:00+00:00", "source": "JAXA", "index_right": 1265, "objectid_1": 1266, "objectid": 1747, "layer_revi": "gambut", "shape_leng": 429079.260415, "globalid": "{2CF8EF08-2914-445D-B58A-34B3EADCEA47}", "shape_Le_1": 427203.8494205073, "shape_Area": 2683153680.2708316, "cluster_id": 0}, "geometry": {"type": "Point", "coordinates": [104.02, -1.56]}}]}]}
+</file>
+
+<file path="test_fully_offline.py">
+import json
+from google.cloud.aiplatform.prediction import LocalModel
+from predictor import WildfireHeuristicPredictor
+
+print("--- Starting Final Offline Container Test ---")
+
+# This builds the container with your latest, correct code.
+print("Building the CPR container...")
+local_model = LocalModel.build_cpr_model(
+    ".",
+    "asia-southeast2-docker.pkg.dev/haryo-kebakaran/wildfire-detector-repo/wildfire-heuristic-predictor:local-test",
+    predictor=WildfireHeuristicPredictor,
+    requirements_path="requirements.txt"
+)
+
+print("\n--- Deploying container to local Docker endpoint... ---")
+
+with local_model.deploy_to_local_endpoint(host_port=8080) as local_endpoint:
+    print("Endpoint is live. Sending prediction request...")
+
+    try:
+        # Prepare the request body in the correct format
+        with open("incidents.jsonl", "r") as f:
+            incident_data = json.load(f)
+        request_body = {"instances": [incident_data]}
+        temp_request_file = "temp_request.json"
+        with open(temp_request_file, "w") as f:
+            json.dump(request_body, f)
+
+        # Send the request
+        predict_response = local_endpoint.predict(
+            request_file=temp_request_file,
+            headers={"Content-Type": "application/json"},
+        )
+        
+        if predict_response.status_code == 200:
+            print("\n--- ✅ Prediction Successful (Status Code 200) ---")
+            print("\n--- Parsed Predictions ---")
+            
+            # --- THIS IS THE CORRECT PARSING LOGIC ---
+            response_content = predict_response.content.decode('utf-8')
+            # 1. Parse the entire response as a JSON object (a dictionary)
+            response_dict = json.loads(response_content)
+            # 2. Extract the list of predictions from the 'predictions' key
+            all_predictions = response_dict['predictions']
+            # --- END OF CORRECTION ---
+            
+            for prediction in all_predictions:
+                instance_id = prediction['instance_id']
+                score = prediction['confidence_score']
+                print(f"  Cluster ID: {instance_id}, Predicted Risk Score: {score:.4f}")
+        else:
+            print(f"\n--- ❌ Prediction Failed with Status Code: {predict_response.status_code} ---")
+            print("--- Server Response ---")
+            print(predict_response.text)
+
+    except Exception as e:
+        print(f"\n--- ❌ Test Script Crashed ---")
+        print(f"Error: {e}")
+
+print("\n--- Local endpoint has been shut down. Test complete. ---")
+</file>
+
+<file path="test_logic_offline.py">
+import json
+import numpy as np
+# Import the core logic class directly
+from predictor import FireRiskHeuristicModel 
+
+print("--- Starting Pure Python Offline Logic Test ---")
+
+# 1. Load the model configuration
+try:
+    with open("config.json", 'r') as f:
+        model_config = json.load(f)
+    print("Successfully loaded config.json")
+except Exception as e:
+    print(f"Failed to load config.json: {e}")
+    exit()
+
+# 2. Instantiate the core logic model
+risk_model = FireRiskHeuristicModel(config=model_config)
+print("Heuristic model instantiated.")
+
+# 3. Open the local incidents file and process it
+print("\n--- Processing incidents.jsonl with manual pre-processing ---")
+try:
+    with open("incidents.jsonl", "r") as f:
+        file_content = f.read()
+        incident_data = json.loads(file_content)
+        
+        # --- MANUAL PRE-PROCESSING STEP ---
+        # This step simulates what the WildfireHeuristicPredictor.preprocess
+        # method does before calling the model.
+        hotspots = incident_data.get("hotspots", [])
+        if hotspots:
+            frp_values = [h['properties']['frp_mean'] for h in hotspots if 'frp_mean' in h.get('properties', {})]
+            avg_frp = np.mean(frp_values) if frp_values else 0
+        else:
+            avg_frp = 0
+        
+        # Add the new value to the data dictionary before scoring
+        incident_data['avg_frp'] = avg_frp
+        print(f"Pre-processing complete. Calculated Average FRP: {avg_frp:.2f}")
+        # --- END OF MANUAL PRE-PROCESSING ---
+
+        cluster_id = incident_data.get("cluster_id", "N/A")
+        
+        # Pass the pre-processed data to the model
+        result = risk_model.predict_confidence(incident_data)
+        score = result['confidence_score']
+        
+        print(f"\n  Cluster ID: {cluster_id}, Predicted Risk Score: {score:.4f}")
+
+except Exception as e:
+    print(f"\nAn error occurred: {e}")
+
+print("\n--- Test complete. ---")
+</file>
+
+<file path="test_with_gcs.py">
+import os
+import json
+from datetime import datetime
+from google.cloud import aiplatform, storage
+
+# --- Configuration (remains the same) ---
+PROJECT_ID = "haryo-kebakaran"
+REGION = "asia-southeast2"
+GCS_BUCKET_NAME = "fire-app-bucket"
+MODEL_RESOURCE_NAME = "projects/216616339006/locations/asia-southeast2/models/4863210298397425664" 
+GCS_INPUT_URI = "gs://fire-app-bucket/01_incidents_detected/2019-09-21/incidents.jsonl"
+
+
+def main():
+    """Runs a full end-to-end test against the deployed Vertex AI model using a real GCS file."""
+
+    aiplatform.init(project=PROJECT_ID, location=REGION)
+    storage_client = storage.Client()
+    
+    print(f"--- 1. Verifying input file exists ---")
+    bucket_name, blob_name = GCS_INPUT_URI.replace("gs://", "").split("/", 1)
+    bucket = storage_client.bucket(bucket_name)
+    input_blob = bucket.blob(blob_name)
+    
+    if not input_blob.exists():
+        print(f"ERROR: The specified input file does not exist: {GCS_INPUT_URI}")
+        return
+    print(f"Input file verified: {GCS_INPUT_URI}")
+
+    print("\n--- 2. Triggering Vertex AI Batch Prediction Job ---")
+    
+    model = aiplatform.Model(MODEL_RESOURCE_NAME)
+    
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    job_display_name = f"real_data_test_job_{timestamp}"
+    gcs_output_uri_prefix = f"gs://{GCS_BUCKET_NAME}/gcs_testing_output/{job_display_name}/"
+
+    # --- THE FIX IS HERE ---
+    # We must specify the machine type for custom models.
+    job = model.batch_predict(
+        job_display_name=job_display_name,
+        gcs_source=GCS_INPUT_URI,
+        gcs_destination_prefix=gcs_output_uri_prefix,
+        sync=True,
+        machine_type="n1-standard-2",  # Added this required parameter
+    )
+    # -----------------------
+    
+    print(f"Batch prediction job '{job.display_name}' completed.")
+    print(f"Job state: {job.state}")
+
+    print("\n--- 3. Downloading and verifying results ---")
+    
+    output_location = job.output_info.gcs_output_directory
+    print(f"Results are located in: {output_location}")
+
+    prefix = output_location.replace(f"gs://{GCS_BUCKET_NAME}/", "")
+    blobs = storage_client.list_blobs(GCS_BUCKET_NAME, prefix=prefix)
+    result_blob = next((b for b in blobs if "prediction.results" in b.name), None)
+
+    if not result_blob:
+        print("ERROR: Could not find prediction results file in the output directory.")
+        return
+
+    result_content = result_blob.download_as_string().decode('utf-8')
+
+    print("\n--- Parsed Predictions ---")
+    for line in result_content.strip().split('\n'):
+        prediction = json.loads(line)
+        instance_id = prediction['instance_id']
+        score = prediction['confidence_score']
+        print(f"  Cluster ID: {instance_id}, Predicted Risk Score: {score:.4f}")
+
+    print("\n--- Test complete. ---")
+
+if __name__ == "__main__":
+    main()
 </file>
 
 </files>

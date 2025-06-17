@@ -105,23 +105,27 @@ def result_processor_cloud_function(event, context):
         if pred.get("instance_id"):
             grouped_predictions[pred["instance_id"]].append(pred)
     
+    # --- THIS SECTION IS NOW FIXED ---
     incidents_path = f"{GCS_PATHS['INCIDENTS_DETECTED']}/{run_date}/{FILE_NAMES['incident_data']}"
     input_path = f"{GCS_PATHS['PREDICTION_JOBS']}/{run_date}/{job_id}/{FILE_NAMES['batch_input']}"
     try:
         incidents_content = bucket.blob(incidents_path).download_as_string().decode('utf-8')
         incidents_data = json.loads(incidents_content)
         
+        # Standardize so we are always dealing with a list of incidents
         if isinstance(incidents_data, dict):
             incidents_data = [incidents_data]
             
         incidents_by_cluster = {inc['cluster_id']: inc for inc in incidents_data}
         
+        # This part for input_metadata is optional for the new report but maintains consistency
         input_content = bucket.blob(input_path).download_as_string().decode('utf-8')
         input_data = [json.loads(line) for line in input_content.strip().split('\n')]
         input_metadata = {inst['cluster_id']: inst for inst in input_data}
     except Exception as e:
         logger.error(f"Failed to load supporting data: {e}")
         return
+    # --- END OF FIX ---
 
     if not grouped_predictions:
         logger.error("No valid clusters to visualize.")
@@ -131,17 +135,20 @@ def result_processor_cloud_function(event, context):
     m = folium.Map(location=[-2.5, 118], zoom_start=5)
 
     for cluster_id, preds_for_cluster in grouped_predictions.items():
+        # Use the prediction itself, which has the instance_id (cluster_id)
         incident_data = incidents_by_cluster.get(cluster_id)
         if not incident_data: 
             logger.warning(f"No incident data found for cluster {cluster_id}")
             continue
 
+        # Use the first prediction for the main score display
         main_prediction = preds_for_cluster[0]
         score = main_prediction.get('confidence_score', 0.0)
         marker_color = 'red' if score > 0.75 else 'orange' if score > 0.5 else 'green'
 
         popup_html = f"<h4>Cluster ID: {cluster_id}</h4><h3>Risk Score: {score:.2f}</h3><hr>"
         popup_html += f"<b>Hotspot Count:</b> {incident_data.get('point_count', 'N/A')}<br>"
+        # Add other context if available
         if incident_data.get('realtime_context'):
             popup_html += f"<b>Air Quality:</b> {incident_data['realtime_context']['air_quality']['air_quality_severity']}<br>"
             popup_html += f"<b>Humidity:</b> {incident_data['realtime_context']['weather']['relative_humidity_percent']}%<br>"
@@ -157,21 +164,18 @@ def result_processor_cloud_function(event, context):
 
     report_filename = f"heuristic_wildfire_report_{run_date}_{job_id}.html"
     report_path = f"{GCS_PATHS['FINAL_REPORTS']}/{run_date}/{report_filename}"
-    local_temp_path = f"/tmp/{output_filename}"
+    local_temp_path = f"/tmp/{report_filename}"
     m.save(local_temp_path)
     bucket.blob(report_path).upload_from_filename(local_temp_path, content_type='text/html')
     logger.info(f"Report saved to: gs://{GCS_BUCKET_NAME}/{report_path}")
 
     logger.info("Result Processor function finished successfully.")
 
-# --- THIS BLOCK IS FOR DIRECT, UN-MOCKED LOCAL RUNS ---
 if __name__ == "__main__":
     print("--- Running Result Processor locally ---")
-    # Set all required environment variables for a direct run
     os.environ['IS_LOCAL_TEST'] = 'true'
     os.environ['GCP_PROJECT_ID'] = 'haryo-kebakaran'
     os.environ['GCP_REGION'] = 'asia-southeast2'
-    # THIS LINE WAS MISSING
-    os.environ['GCS_BUCKET_NAME'] = 'fire-app-bucket' 
+    os.environ['GCS_BUCKET_NAME'] = 'fire-app-bucket'
     result_processor_cloud_function(event=None, context=None)
     print("--- Local run of Result Processor finished ---")

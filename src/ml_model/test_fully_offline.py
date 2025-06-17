@@ -1,47 +1,58 @@
 import json
 from google.cloud.aiplatform.prediction import LocalModel
+from predictor import WildfireHeuristicPredictor
 
-# --- THIS IS THE IMAGE WE JUST BUILT MANUALLY ---
-PRE_BUILT_IMAGE_URI = "asia-southeast2-docker.pkg.dev/haryo-kebakaran/wildfire-detector-repo/wildfire-heuristic-predictor:local-test"
+print("--- Starting Final Offline Container Test ---")
 
-print("--- Skipping build and using pre-built local image ---")
-print(f"Image URI: {PRE_BUILT_IMAGE_URI}")
+# This builds the container with your latest, correct code.
+print("Building the CPR container...")
+local_model = LocalModel.build_cpr_model(
+    ".",
+    "asia-southeast2-docker.pkg.dev/haryo-kebakaran/wildfire-detector-repo/wildfire-heuristic-predictor:local-test",
+    predictor=WildfireHeuristicPredictor,
+    requirements_path="requirements.txt"
+)
 
-# 1. Instantiate LocalModel directly from the image URI.
-#    This completely bypasses the failing .build_cpr_model() step.
-local_model = LocalModel(serving_container_image_uri=PRE_BUILT_IMAGE_URI)
+print("\n--- Deploying container to local Docker endpoint... ---")
 
-print("\n--- Deploying to local Docker endpoint. This may take a moment... ---")
-
-# 2. This 'with' block starts the Docker container, runs the test, and automatically cleans up.
 with local_model.deploy_to_local_endpoint(host_port=8080) as local_endpoint:
-    
-    print("Endpoint is live on local Docker. Sending prediction request...")
+    print("Endpoint is live. Sending prediction request...")
 
     try:
+        # Prepare the request body in the correct format
+        with open("incidents.jsonl", "r") as f:
+            incident_data = json.load(f)
+        request_body = {"instances": [incident_data]}
+        temp_request_file = "temp_request.json"
+        with open(temp_request_file, "w") as f:
+            json.dump(request_body, f)
+
+        # Send the request
         predict_response = local_endpoint.predict(
-            request_file="incidents.jsonl",
+            request_file=temp_request_file,
             headers={"Content-Type": "application/json"},
         )
         
-        if predict_response.status_code != 200:
-            print(f"\n--- ❌ Prediction Failed with Status Code: {predict_response.status_code} ---")
-            print("--- Server Response ---")
-            print(predict_response.text)
-            print("\n--- Printing container logs for debugging ---")
-            local_endpoint.print_container_logs()
-        else:
+        if predict_response.status_code == 200:
             print("\n--- ✅ Prediction Successful (Status Code 200) ---")
             print("\n--- Parsed Predictions ---")
             
+            # --- THIS IS THE CORRECT PARSING LOGIC ---
             response_content = predict_response.content.decode('utf-8')
-            # The local server returns a list directly
-            all_predictions = json.loads(response_content)
+            # 1. Parse the entire response as a JSON object (a dictionary)
+            response_dict = json.loads(response_content)
+            # 2. Extract the list of predictions from the 'predictions' key
+            all_predictions = response_dict['predictions']
+            # --- END OF CORRECTION ---
             
             for prediction in all_predictions:
                 instance_id = prediction['instance_id']
                 score = prediction['confidence_score']
                 print(f"  Cluster ID: {instance_id}, Predicted Risk Score: {score:.4f}")
+        else:
+            print(f"\n--- ❌ Prediction Failed with Status Code: {predict_response.status_code} ---")
+            print("--- Server Response ---")
+            print(predict_response.text)
 
     except Exception as e:
         print(f"\n--- ❌ Test Script Crashed ---")
