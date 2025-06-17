@@ -1,0 +1,15 @@
+# Use a standard Python base image that matches the cloud environment
+FROM python:3.11-slim
+
+# Set a working directory inside the container
+WORKDIR /app
+
+# Copy and install requirements first. This is where many errors happen.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the model's code into the container
+COPY . .
+
+# A placeholder command to indicate the build can finish
+CMD ["echo", "Build successful"]

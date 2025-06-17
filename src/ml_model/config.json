@@ -1,0 +1,63 @@
+{
+    "criteria": [
+        {
+            "name": "Fire Intensity (Avg FRP)",
+            "data_key": "avg_frp",
+            "weight": 0.30,
+            "type": "numerical_threshold",
+            "direction": "ascending",
+            "mapping": {
+                "100": 2.0, "500": 5.0, "1000": 8.0, "1500": 10.0
+            }
+        },
+        {
+            "name": "Hotspot Density",
+            "data_key": "point_count",
+            "weight": 0.25,
+            "type": "numerical_threshold",
+            "direction": "ascending",
+            "mapping": {
+                "5": 2.0, "10": 4.0, "20": 7.0, "30": 10.0
+            }
+        },
+        {
+            "name": "Air Quality Impact",
+            "data_key": "realtime_context.air_quality.air_quality_severity",
+            "weight": 0.20,
+            "type": "categorical",
+            "mapping": {
+                "low": 1.0, "moderate": 4.0, "high": 7.0, "severe": 10.0, "unknown": 3.0
+            }
+        },
+        {
+            "name": "Precipitation (Rain)",
+            "data_key": "realtime_context.weather.precipitation_mm",
+            "weight": 0.15,
+            "type": "numerical_threshold",
+            "direction": "ascending",
+            "mapping": {
+                "0": 10.0, "0.1": 1.0
+            }
+        },
+        {
+            "name": "Relative Humidity",
+            "data_key": "realtime_context.weather.relative_humidity_percent",
+            "weight": 0.05,
+            "type": "numerical_threshold",
+            "direction": "descending",
+            "mapping": {
+                "30": 10.0, "45": 8.0, "60": 5.0, "80": 3.0, "100": 1.0
+            }
+        },
+        {
+            "name": "Wind Speed",
+            "data_key": "realtime_context.weather.wind_speed_kmh",
+            "weight": 0.05,
+            "type": "numerical_threshold",
+            "direction": "ascending",
+            "mapping": {
+                "10": 1.0, "20": 3.0, "35": 7.0, "50": 10.0
+            }
+        }
+    ]
+}

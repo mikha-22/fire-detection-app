@@ -1,0 +1,32 @@
+steps:
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    mkdir -p deploy_staging/prediction_job_initiator
+    cp src/cloud_functions/image_processor/main.py deploy_staging/prediction_job_initiator/main.py
+    cp src/cloud_functions/image_processor/requirements.txt deploy_staging/prediction_job_initiator/requirements.txt
+    cp -r src deploy_staging/prediction_job_initiator/src
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: 'gcloud'
+  args:
+  - 'functions'
+  - 'deploy'
+  - 'PredictionJobInitiatorCF'
+  - '--gen2'
+  - '--runtime=python311'
+  - '--region=asia-southeast2'
+  - '--source=./deploy_staging/prediction_job_initiator'
+  - '--entry-point=prediction_job_initiator_cloud_function' # Ensure the function in main.py is also renamed
+  - '--trigger-topic=wildfire-cluster-detected'
+  - '--service-account=fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
+  - '--set-env-vars=GCP_PROJECT_ID=haryo-kebakaran,GCP_REGION=asia-southeast2,GCS_BUCKET_NAME=fire-app-bucket,VERTEX_AI_HEURISTIC_MODEL=wildfire-heuristic-predictor-model'
+  - '--timeout=540s'
+  - '--memory=1GiB'
+  - '--project=haryo-kebakaran'
+  - '--allow-unauthenticated'
+serviceAccount: 'projects/haryo-kebakaran/serviceAccounts/fire-app-vm-service-account@haryo-kebakaran.iam.gserviceaccount.com'
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: '1200s'
