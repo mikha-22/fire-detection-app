@@ -3,6 +3,7 @@
 import os
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from google.cloud import firestore, aiplatform, storage
@@ -90,29 +91,44 @@ def image_processor_cloud_function(event, context):
 
     try:
         imagery_acquirer = SatelliteImageryAcquirer(gcs_bucket_name=GCS_BUCKET_NAME)
-        gcs_uris_by_cluster = imagery_acquirer.acquire_and_export_imagery(regions_to_acquire, acquisition_date=run_date)
+        export_tasks = imagery_acquirer.acquire_and_export_imagery(regions_to_acquire, acquisition_date=run_date)
 
-        if not gcs_uris_by_cluster:
-            _log_json("ERROR", "Failed to acquire any satellite images.")
+        if not export_tasks:
+            _log_json("ERROR", "Failed to acquire any satellite images: no export tasks were initiated.")
             return
 
+        _log_json("INFO", f"Waiting for {len(export_tasks)} GEE export tasks to complete. This may take several minutes...")
+        
         instances_for_batch = []
-        for region in regions_to_acquire:
-            cluster_id = region["id"]
-            if cluster_id in gcs_uris_by_cluster and gcs_uris_by_cluster[cluster_id]:
-                for image_info in gcs_uris_by_cluster[cluster_id]:
+        for task in export_tasks:
+            task_start_time = time.time()
+            while task.active():
+                _log_json("INFO", f"Task {task.id} ({task.cluster_metadata['cluster_id']}) is {task.status()['state']}...")
+                time.sleep(30)
+            
+            final_status = task.status()
+            elapsed = time.time() - task_start_time
+
+            if final_status['state'] == 'COMPLETED':
+                _log_json("INFO", f"Task {task.id} completed in {elapsed:.2f}s.", status=final_status)
+                destination_uris = final_status.get('destination_uris', [])
+                for uri in destination_uris:
+                    meta = task.cluster_metadata
+                    instance_id_suffix = os.path.basename(uri).replace('.tif', '')
                     instances_for_batch.append({
-                        "instance_id": f"{cluster_id}_{image_info['source']}",
+                        "instance_id": instance_id_suffix,
                         "clusters": [{
-                            "cluster_id": cluster_id,
-                            "gcs_image_uri": image_info['uri'],
-                            "image_bbox": region["bbox"],
-                            "source": image_info['source']
+                            "cluster_id": meta['cluster_id'],
+                            "gcs_image_uri": uri,
+                            "image_bbox": meta['image_bbox'],
+                            "source": meta['source']
                         }]
                     })
-        
+            else:
+                _log_json("ERROR", f"Task {task.id} ({task.cluster_metadata['cluster_id']}) failed after {elapsed:.2f}s.", status=final_status)
+
         if not instances_for_batch:
-            _log_json("ERROR", "No instances to process after image acquisition.")
+            _log_json("ERROR", "No instances to process after waiting for image acquisition tasks.")
             return
 
         jsonl_content = "\n".join([json.dumps(inst) for inst in instances_for_batch])

@@ -45,9 +45,7 @@ class SatelliteImageryAcquirer:
         return image.select(landsat_bands).rename(sentinel_bands)
 
     def _get_best_image(self, collection: ee.ImageCollection, geometry: ee.Geometry, source_name: str) -> Optional[ee.Image]:
-        # Use the correct cloud cover property name based on the satellite source.
         cloud_property = 'CLOUDY_PIXEL_PERCENTAGE' if source_name == 'sentinel2' else 'CLOUD_COVER'
-        
         best_image_candidate = collection.filterBounds(geometry).sort(cloud_property).first()
         
         if not best_image_candidate.getInfo():
@@ -68,7 +66,7 @@ class SatelliteImageryAcquirer:
         return best_image_candidate.select(['B4', 'B3', 'B2']).unitScale(0, 16000).multiply(255).toByte()
 
     def acquire_and_export_imagery(self, monitored_regions: List[Dict[str, Any]],
-                                  acquisition_date: Optional[str] = None) -> Dict[str, List[Dict[str, str]]]:
+                                  acquisition_date: Optional[str] = None) -> List[ee.batch.Task]:
         if not acquisition_date:
             acquisition_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         
@@ -88,12 +86,11 @@ class SatelliteImageryAcquirer:
         landsat_collection = l8_collection.merge(l9_collection)
 
         image_sources = {"sentinel2": s2_collection, "landsat": landsat_collection}
-        exported_image_uris: Dict[str, List[Dict[str, str]]] = {}
+        export_tasks = []
 
         for region in monitored_regions:
             region_id = region["id"]
             geometry = ee.Geometry.Rectangle(region["bbox"])
-            exported_image_uris[region_id] = []
 
             for source_name, collection in image_sources.items():
                 image_to_export = self._get_best_image(collection, geometry, source_name)
@@ -102,23 +99,33 @@ class SatelliteImageryAcquirer:
                     continue
 
                 try:
-                    image_filename = f"{region_id}_{source_name}.tif"
-                    gcs_file_prefix = f"{GCS_PATHS['SATELLITE_IMAGERY']}/{acquisition_date}/{image_filename}"
-                    expected_gcs_image_uri = f"gs://{self.gcs_bucket_name}/{gcs_file_prefix}"
+                    gcs_file_prefix = f"{GCS_PATHS['SATELLITE_IMAGERY']}/{acquisition_date}/{region_id}_{source_name}"
 
                     task = ee.batch.Export.image.toCloudStorage(
                         image=image_to_export,
                         description=f"Export_{region_id}_{source_name}_{acquisition_date.replace('-', '')}",
                         bucket=self.gcs_bucket_name,
-                        fileNamePrefix=gcs_file_prefix.replace(".tif", ""),
-                        scale=20,
+                        fileNamePrefix=gcs_file_prefix,
+                        
+                        # --- FIX: CONTROL THE OUTPUT IMAGE SIZE ---
+                        # Specify dimensions to prevent enormous files. GEE will calculate the scale.
+                        dimensions='1024x1024',
+                        
                         region=geometry.getInfo()['coordinates'],
-                        fileFormat='GeoTIFF', maxPixels=2e10
+                        fileFormat='GeoTIFF',
+                        maxPixels=2e10
                     )
                     task.start()
                     
-                    exported_image_uris[region_id].append({"source": source_name, "uri": expected_gcs_image_uri})
+                    task.cluster_metadata = {
+                        "cluster_id": region_id,
+                        "source": source_name,
+                        "image_bbox": region["bbox"]
+                    }
+                    export_tasks.append(task)
+                    
                     _log_json("INFO", "GEE export task initiated.", region_id=region_id, source=source_name, task_id=task.id)
                 except Exception as e:
                     _log_json("ERROR", f"Failed to initiate GEE export for {region_id}, {source_name}.", error=str(e))
-        return exported_image_uris
+        
+        return export_tasks
