@@ -19,3 +19,4 @@ fire-venv/
 /tmp/ # Temporary directory used on VM and locally
 repomix-output.xml
 
+.cache.sqlite
