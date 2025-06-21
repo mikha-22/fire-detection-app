@@ -10,7 +10,6 @@ import paramiko
 # --- JAXA Configuration ---
 JAXA_SFTP_HOST = 'ftp.ptree.jaxa.jp'
 JAXA_SFTP_PORT = 2051
-# --- CORRECTED: Use the L3 path based on your successful FTP traversal ---
 JAXA_L3_BASE_PATH = '/pub/himawari/L3/WLF/010/'
 USERNAME = "nathaniell.wijaya_gmail.com"
 PASSWORD = "SP+wari8"
@@ -33,15 +32,12 @@ class JaxaDataRetriever:
         prefixes for a given Indonesian day (UTC+7).
         """
         target_date = datetime.strptime(target_date_str, '%Y-%m-%d')
-        # An Indonesian day (UTC+7) starts at 17:00 UTC the previous day
         start_utc = datetime(target_date.year, target_date.month, target_date.day, 17, 0, 0, tzinfo=timezone.utc) - timedelta(days=1)
         
         paths = []
         for i in range(24):
             current_hour = start_utc + timedelta(hours=i)
-            # Path format based on your FTP log: YYYYMM/DD/
             remote_dir = f"{self.base_path}{current_hour.strftime('%Y%m')}/{current_hour.strftime('%d')}/"
-            # Filename prefix format: Hnn_YYYYMMDD_hh00_...
             filename_prefix = f"H09_{current_hour.strftime('%Y%m%d')}_{current_hour.strftime('%H')}00"
             paths.append((remote_dir, filename_prefix))
         return paths
@@ -73,12 +69,10 @@ class JaxaDataRetriever:
                             remote_filepath = remote_dir + target_filename
                             with sftp.open(remote_filepath, 'r') as f:
                                 content = f.read().decode('utf-8')
-                                # L3 Hourly Format: year, month, day, hour, lat, lon, FRP (mean), FRP (max), confidence, N
-                                col_names = ['year', 'month', 'day', 'hour', 'latitude', 'longitude', 'frp_mean', 'frp_max', 'confidence', 'n_detections']
-                                df = pd.read_csv(io.StringIO(content), names=col_names, header=None, comment='#')
                                 
-                                # Create datetime from columns
-                                df['acq_datetime'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']]).dt.tz_localize('UTC')
+                                # --- CORRECTED: Use the actual column names from the file ---
+                                col_names = ['year', 'month', 'day', 'hour', 'lat', 'lon', 'ave(frp)', 'max(frp)', 'ave(confidence)', 'N']
+                                df = pd.read_csv(io.StringIO(content), names=col_names, header=None, comment='#')
                                 all_hotspots_df.append(df)
 
                         except FileNotFoundError:
