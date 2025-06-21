@@ -11,31 +11,34 @@ from retry_requests import retry
 
 class WeatherDataAcquirer:
     """
-    A dedicated class for acquiring historical weather data from Open-Meteo.
+    A dedicated class for acquiring real-time weather data from Open-Meteo.
+    Uses the live forecast API for up-to-the-hour data.
     """
     def __init__(self):
         """Initializes the Open-Meteo client with caching and retry logic."""
-        logging.info("WeatherDataAcquirer initialized.")
+        logging.info("WeatherDataAcquirer initialized (Real-Time Forecast API).")
         cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
         self.openmeteo = openmeteo_requests.Client(session=retry(cache_session, retries=5, backoff_factor=0.2))
 
     def get_historical_weather_data(self, latitude: float, longitude: float, timestamp: datetime) -> dict:
         """
-        Fetches historical weather data for a specific location and time using the
-        Open-Meteo Historical Weather API (ERA5 reanalysis).
+        Fetches real-time weather data for a specific location and time using the
+        Open-Meteo Forecast API.
         """
-        logging.info(f"Fetching historical weather for lat={latitude}, lon={longitude}")
+        logging.info(f"Fetching real-time weather for lat={latitude}, lon={longitude}")
         
-        date_str = timestamp.strftime('%Y-%m-%d')
+        # --- CORRECTED: Use the real-time forecast API endpoint ---
+        url = "https://api.open-meteo.com/v1/forecast"
         
         params = {
-            "latitude": latitude, "longitude": longitude,
-            "start_date": date_str, "end_date": date_str,
+            "latitude": latitude, 
+            "longitude": longitude,
             "hourly": ["temperature_2m", "relative_humidity_2m", "dew_point_2m", "precipitation",
-                       "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m"]
+                       "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m"],
+            "timezone": "UTC" # Ensure all data is in UTC
         }
         try:
-            responses = self.openmeteo.weather_api("https://archive-api.open-meteo.com/v1/era5", params=params)
+            responses = self.openmeteo.weather_api(url, params=params)
             response = responses[0]
             
             hourly = response.Hourly()
@@ -50,10 +53,15 @@ class WeatherDataAcquirer:
             hourly_data["wind_gusts_10m"] = hourly.Variables(6).ValuesAsNumpy()
 
             hourly_df = pd.DataFrame(data=hourly_data)
-            if hourly_df.empty: return {"error": "No weather data returned."}
+            if hourly_df.empty: return {"error": "No weather data returned from API."}
 
+            # Find the closest hourly forecast to the incident's timestamp
             target_timestamp_utc = timestamp.astimezone(pytz.utc)
             closest_row = hourly_df.iloc[(hourly_df['date'] - target_timestamp_utc).abs().argsort()[0]]
+
+            if pd.isna(closest_row['temperature_2m']):
+                logging.warning("Weather data contained NaN values. Returning error.")
+                return {"error": "Valid weather data not available for the specific timestamp."}
 
             raw_weather = {
                 "timestamp_utc": closest_row['date'].isoformat(),
@@ -68,9 +76,9 @@ class WeatherDataAcquirer:
 
             sanitized_weather = {}
             for key, value in raw_weather.items():
-                if isinstance(value, np.floating):
+                if isinstance(value, (np.floating, float)) and not pd.isna(value):
                     sanitized_weather[key] = round(float(value), 2)
-                elif isinstance(value, np.integer):
+                elif isinstance(value, (np.integer, int)) and not pd.isna(value):
                     sanitized_weather[key] = int(value)
                 else:
                     sanitized_weather[key] = value

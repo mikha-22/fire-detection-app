@@ -26,7 +26,7 @@ FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
 OUTPUT_TOPIC_NAME = "wildfire-cluster-detected"
 PEATLAND_SHP_PATH = "src/geodata/Indonesia_peat_lands.shp"
 PEATLAND_BUFFER_METERS = 1000
-MIN_SAMPLES_PER_CLUSTER = 8
+MIN_SAMPLES_PER_CLUSTER = 5
 DBSCAN_MAX_DISTANCE_KM = 5
 DBSCAN_EPS_RAD = DBSCAN_MAX_DISTANCE_KM / 6371
 INDONESIA_BBOX = [95.0, -11.0, 141.0, 6.0]
@@ -36,7 +36,8 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def _log_json(severity: str, message: str, **kwargs):
     log_entry = {"severity": severity.upper(), "message": message, "timestamp": datetime.now(timezone.utc).isoformat(), "component": "IncidentDetector", **kwargs}
-    print(json.dumps(log_entry, default=str))
+    # --- FIX: Ensure UTF-8 characters are not escaped for readability ---
+    print(json.dumps(log_entry, default=str, ensure_ascii=False))
 
 def standardize_hotspot_df(df: pd.DataFrame, source_name: str) -> Optional[pd.DataFrame]:
     if df.empty: return None
@@ -162,8 +163,6 @@ def incident_detector_cloud_function(event, context, run_date_str: Optional[str]
         hotspot_columns_to_keep = ['latitude', 'longitude', 'acq_datetime', 'frp_mean', 'frp_max', 'confidence', 'n_detections', 'source', 'cluster_id']
         final_hotspot_df = cluster_gdf[[col for col in hotspot_columns_to_keep if col in cluster_gdf.columns]].copy()
         final_hotspot_df['id'] = final_hotspot_df.index.astype(str)
-        
-        # --- FIX: Convert datetime to string *before* creating the JSON ---
         final_hotspot_df['acq_datetime'] = final_hotspot_df['acq_datetime'].astype(str)
         hotspots_list = json.loads(final_hotspot_df.to_json(orient='records'))
         
@@ -181,8 +180,9 @@ def incident_detector_cloud_function(event, context, run_date_str: Optional[str]
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     output_blob_path = f"{GCS_PATHS['INCIDENTS_DETECTED']}/{run_date_str}/{FILE_NAMES['incident_data']}"
-    jsonl_content = "\n".join([json.dumps(incident, indent=2, default=str) for incident in all_incidents])
-    bucket.blob(output_blob_path).upload_from_string(jsonl_content, content_type='application/jsonl')
+    # --- FIX: Ensure UTF-8 characters are not escaped for readability ---
+    jsonl_content = "\n".join([json.dumps(incident, indent=2, default=str, ensure_ascii=False) for incident in all_incidents])
+    bucket.blob(output_blob_path).upload_from_string(jsonl_content, content_type='application/jsonl; charset=utf-8')
     _log_json("INFO", f"Successfully wrote {len(all_incidents)} enriched incidents to gs://{GCS_BUCKET_NAME}/{output_blob_path}")
     
     severity_counts = {inc["fire_severity_assessment"]["overall_severity"]: 0 for inc in all_incidents}
@@ -191,7 +191,7 @@ def incident_detector_cloud_function(event, context, run_date_str: Optional[str]
     
     publisher = pubsub.PublisherClient()
     topic_path = publisher.topic_path(GCP_PROJECT_ID, OUTPUT_TOPIC_NAME)
-    message_json = json.dumps({"status": "incidents_detected", "incident_count": len(all_incidents), "run_date": run_date_str, "severity_summary": severity_counts}, default=str)
+    message_json = json.dumps({"status": "incidents_detected", "incident_count": len(all_incidents), "run_date": run_date_str, "severity_summary": severity_counts}, default=str, ensure_ascii=False)
     publisher.publish(topic_path, data=message_json.encode('utf-8')).result()
     _log_json("INFO", "Successfully published completion signal")
 
@@ -201,4 +201,4 @@ if __name__ == "__main__":
     os.environ['GCS_BUCKET_NAME'] = 'fire-app-bucket'
     if 'FIRMS_API_KEY' not in os.environ:
         os.environ['FIRMS_API_KEY'] = 'your_firms_api_key_here'
-    incident_detector_cloud_function(event=None, context=None, run_date_str="2025-05-20")
+    incident_detector_cloud_function(event=None, context=None, run_date_str="2025-06-20")

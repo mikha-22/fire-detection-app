@@ -2,7 +2,7 @@
 """
 Air Quality Data Acquirer for Wildfire Detection System.
 Retrieves and assesses Sentinel-5P air quality data from Google Earth Engine.
-Logic adapted from Claude's validated test script.
+This version is corrected to ONLY use Near Real-Time (NRTI) data.
 """
 
 import os
@@ -14,21 +14,25 @@ import ee
 
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "haryo-kebakaran")
 
+# --- CORRECTED: Use ONLY Near Real-Time (NRTI) collections ---
 S5P_FIRE_PRODUCTS = {
     "CO": {
-        "collection": "COPERNICUS/S5P/OFFL/L3_CO", "band": "CO_column_number_density",
+        "collection": "COPERNICUS/S5P/NRTI/L3_CO",
+        "band": "CO_column_number_density",
         "unit": "µmol/m²", "scale_factor": 1e6,
         "fire_threshold": 50000, "severe_threshold": 100000,
         "description": "Carbon Monoxide"
     },
     "AEROSOL": {
-        "collection": "COPERNICUS/S5P/OFFL/L3_AER_AI", "band": "absorbing_aerosol_index",
+        "collection": "COPERNICUS/S5P/NRTI/L3_AER_AI",
+        "band": "absorbing_aerosol_index",
         "unit": "index", "scale_factor": 1,
         "fire_threshold": 1.0, "severe_threshold": 3.0,
         "description": "Aerosol Index"
     },
     "NO2": {
-        "collection": "COPERNICUS/S5P/OFFL/L3_NO2", "band": "tropospheric_NO2_column_number_density",
+        "collection": "COPERNICUS/S5P/NRTI/L3_NO2",
+        "band": "tropospheric_NO2_column_number_density",
         "unit": "µmol/m²", "scale_factor": 1e6,
         "fire_threshold": 20, "severe_threshold": 50,
         "description": "Nitrogen Dioxide"
@@ -37,7 +41,7 @@ S5P_FIRE_PRODUCTS = {
 
 class AirQualityAcquirer:
     def __init__(self):
-        logging.info("AirQualityAcquirer initialized.")
+        logging.info("AirQualityAcquirer initialized (NRTI-only).")
         try:
             if not ee.data._credentials:
                 ee.Initialize(opt_url='https://earthengine-highvolume.googleapis.com', project=GCP_PROJECT_ID)
@@ -49,20 +53,22 @@ class AirQualityAcquirer:
             raise
 
     def get_air_quality_for_incident(self, latitude: float, longitude: float, incident_timestamp: datetime, buffer_km: float = 50.0) -> Dict[str, Any]:
+        # Use a 3-day window to maximize chance of finding NRTI data
         start_date = incident_timestamp - timedelta(days=3)
         end_date = incident_timestamp + timedelta(days=3)
         point = ee.Geometry.Point([longitude, latitude])
         geometry = point.buffer(buffer_km * 1000)
         
-        logging.info(f"Fetching air quality for incident at ({latitude:.3f}, {longitude:.3f})")
+        logging.info(f"Fetching NRTI air quality for incident at ({latitude:.3f}, {longitude:.3f})")
         
         results = {"measurements": {}, "fire_indicators": [], "air_quality_severity": "unknown"}
         
         for name, config in S5P_FIRE_PRODUCTS.items():
             try:
                 collection = ee.ImageCollection(config['collection']).filterBounds(geometry).filterDate(ee.Date(start_date), ee.Date(end_date)).select(config['band'])
+                
                 if collection.size().getInfo() == 0:
-                    results["measurements"][name] = {"status": "no_data", "error": "No images available"}
+                    results["measurements"][name] = {"status": "no_data", "error": "No NRTI images available for this time range."}
                     continue
                 
                 composite = collection.median()
@@ -71,16 +77,16 @@ class AirQualityAcquirer:
                 
                 if mean_val is not None:
                     scaled_mean = mean_val * config['scale_factor']
-                    results["measurements"][name] = {"status": "success", "value": round(scaled_mean, 2), "unit": config['unit']}
+                    results["measurements"][name] = {"status": "success", "value": round(scaled_mean, 2), "unit": config['unit'], "source": config['collection']}
                     
                     if scaled_mean > config['severe_threshold']:
                         results["fire_indicators"].append({"product": name, "severity": "severe", "value": scaled_mean, "message": f"{config['description']} severely elevated"})
                     elif scaled_mean > config['fire_threshold']:
                         results["fire_indicators"].append({"product": name, "severity": "moderate", "value": scaled_mean, "message": f"{config['description']} moderately elevated"})
                 else:
-                    results["measurements"][name] = {"status": "no_valid_pixels", "error": "No valid pixels in region"}
+                    results["measurements"][name] = {"status": "no_valid_pixels", "error": "No valid pixels in NRTI data for region"}
             except Exception as e:
-                logging.warning(f"Could not retrieve GEE data for {name}: {e}")
+                logging.warning(f"Could not retrieve GEE NRTI data for {name}: {e}")
                 results["measurements"][name] = {"status": "error", "error": str(e)}
         
         severe_count = sum(1 for ind in results["fire_indicators"] if ind["severity"] == "severe")
