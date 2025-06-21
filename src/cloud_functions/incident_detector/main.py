@@ -26,8 +26,8 @@ FIRMS_API_KEY = os.environ.get("FIRMS_API_KEY")
 OUTPUT_TOPIC_NAME = "wildfire-cluster-detected"
 PEATLAND_SHP_PATH = "src/geodata/Indonesia_peat_lands.shp"
 PEATLAND_BUFFER_METERS = 1000
-MIN_SAMPLES_PER_CLUSTER = 3
-DBSCAN_MAX_DISTANCE_KM = 10
+MIN_SAMPLES_PER_CLUSTER = 5 # Adjusted from 20
+DBSCAN_MAX_DISTANCE_KM = 5
 DBSCAN_EPS_RAD = DBSCAN_MAX_DISTANCE_KM / 6371
 INDONESIA_BBOX = [95.0, -11.0, 141.0, 6.0]
 AIR_QUALITY_BUFFER_KM = 50.0
@@ -41,11 +41,7 @@ def _log_json(severity: str, message: str, **kwargs):
 def standardize_hotspot_df(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
     if df.empty: return pd.DataFrame()
     df = df.copy()
-    if source_name == 'FIRMS':
-        df.rename(columns={'acq_date': 'acq_date', 'acq_time': 'acq_time'}, inplace=True)
-        df['acq_datetime'] = pd.to_datetime(df['acq_date'] + ' ' + df['acq_time'].astype(str).str.zfill(4), format='%Y-%m-%d %H%M', utc=True)
-    elif source_name == 'JAXA':
-        df['acq_datetime'] = pd.to_datetime(df[['year', 'month', 'day']]).dt.tz_localize('UTC')
+    # Datetime column is now created in the retriever itself, so no need for conditional logic here
     df['source'] = source_name
     df.dropna(subset=['latitude', 'longitude', 'acq_datetime'], inplace=True)
     for col in ['latitude', 'longitude', 'frp_mean', 'frp_max', 'n_detections', 'confidence']:
@@ -75,8 +71,7 @@ def incident_detector_cloud_function(event, context, run_date_str: Optional[str]
     if not run_date_str:
         jakarta_tz = pytz.timezone('Asia/Jakarta')
         run_date_str = (datetime.now(jakarta_tz) - timedelta(days=1)).strftime('%Y-%m-%d')
-    _log_json("INFO", f"Starting incident detection for date: {run_date_str}")
-    run_date_utc = datetime.strptime(run_date_str, '%Y-%m-%d').replace(tzinfo=pytz.utc)
+    _log_json("INFO", f"Starting incident detection for Indonesian date: {run_date_str}")
 
     firms_retriever = FirmsDataRetriever(api_key=FIRMS_API_KEY, base_url="https://firms.modaps.eosdis.nasa.gov/api/area/csv/", sensors=["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT"])
     jaxa_retriever = JaxaDataRetriever()
@@ -85,15 +80,15 @@ def incident_detector_cloud_function(event, context, run_date_str: Optional[str]
 
     all_hotspots_dfs = []
     try:
-        firms_df = firms_retriever.get_and_filter_firms_data([{"id": "indonesia", "bbox": INDONESIA_BBOX}], date_str=run_date_str)
-        if not firms_df.empty: all_hotspots_dfs.append(standardize_hotspot_df(firms_df, 'FIRMS')); _log_json("INFO", f"Retrieved {len(firms_df)} hotspots from FIRMS")
+        firms_df = firms_retriever.get_data_for_indonesian_day([{"id": "indonesia", "bbox": INDONESIA_BBOX}], target_date_str=run_date_str)
+        if not firms_df.empty: all_hotspots_dfs.append(standardize_hotspot_df(firms_df, 'FIRMS'))
     except Exception as e: _log_json("ERROR", f"Failed to process FIRMS data: {e}")
     try:
-        jaxa_df = jaxa_retriever.get_l3_daily_data(target_date=run_date_utc)
-        if not jaxa_df.empty: all_hotspots_dfs.append(standardize_hotspot_df(jaxa_df, 'JAXA')); _log_json("INFO", f"Retrieved {len(jaxa_df)} hotspots from JAXA")
+        jaxa_df = jaxa_retriever.get_data_for_indonesian_day(target_date_str=run_date_str)
+        if not jaxa_df.empty: all_hotspots_dfs.append(standardize_hotspot_df(jaxa_df, 'JAXA'))
     except Exception as e: _log_json("ERROR", f"Failed to process JAXA data: {e}")
 
-    if not all_hotspots_dfs: _log_json("WARNING", "No hotspot data could be retrieved. Exiting."); return
+    if not all_hotspots_dfs: _log_json("WARNING", "No hotspot data could be retrieved from any source. Exiting."); return
     fused_df = pd.concat(all_hotspots_dfs, ignore_index=True).drop_duplicates(subset=['latitude', 'longitude', 'acq_datetime'])
     _log_json("INFO", f"Fused {len(fused_df)} unique hotspots from {len(all_hotspots_dfs)} sources")
 
@@ -158,5 +153,5 @@ if __name__ == "__main__":
     os.environ['GCP_PROJECT_ID'] = 'haryo-kebakaran'
     os.environ['GCS_BUCKET_NAME'] = 'fire-app-bucket'
     if 'FIRMS_API_KEY' not in os.environ: os.environ['FIRMS_API_KEY'] = 'your_firms_api_key_here'
-    incident_detector_cloud_function(event=None, context=None, run_date_str="2019-09-21")
+    incident_detector_cloud_function(event=None, context=None, run_date_str="2025-06-20")
     print("--- Local run of Incident Detector finished ---")

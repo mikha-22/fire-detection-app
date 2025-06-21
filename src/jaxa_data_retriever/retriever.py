@@ -3,76 +3,98 @@
 import os
 import io
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import paramiko
 
 # --- JAXA Configuration ---
 JAXA_SFTP_HOST = 'ftp.ptree.jaxa.jp'
 JAXA_SFTP_PORT = 2051
-# --- UPDATED: Path to the Daily L3 product ---
-JAXA_L3_DAILY_BASE_PATH = '/pub/himawari/L3/WLF/010/'
+# --- CORRECTED: Use the L3 path based on your successful FTP traversal ---
+JAXA_L3_BASE_PATH = '/pub/himawari/L3/WLF/010/'
 USERNAME = "nathaniell.wijaya_gmail.com"
 PASSWORD = "SP+wari8"
 
 class JaxaDataRetriever:
     """
-    A dedicated class for retrieving daily aggregated wildfire data from the JAXA P-Tree SFTP server.
+    A dedicated class for retrieving hourly Level 3 wildfire data from the JAXA P-Tree SFTP server.
     """
     def __init__(self):
-        """Initializes the JAXA Data Retriever."""
-        logging.info("JaxaDataRetriever initialized for Daily L3 Product.")
+        logging.info("JaxaDataRetriever initialized for L3 Hourly Product.")
         self.host = JAXA_SFTP_HOST
         self.port = JAXA_SFTP_PORT
-        self.base_path = JAXA_L3_DAILY_BASE_PATH
+        self.base_path = JAXA_L3_BASE_PATH
         self.username = USERNAME
         self.password = PASSWORD
 
-    def get_l3_daily_data(self, target_date: datetime) -> pd.DataFrame:
+    def _get_hourly_file_paths_for_indonesian_day(self, target_date_str: str):
         """
-        Connects to the JAXA SFTP server and downloads the single daily summary
-        wildfire CSV file for a specified date.
+        Generates the list of 24 hourly SFTP directories and corresponding file
+        prefixes for a given Indonesian day (UTC+7).
         """
-        logging.info(f"Fetching JAXA L3 Daily wildfire data for target date: {target_date.strftime('%Y-%m-%d')}")
+        target_date = datetime.strptime(target_date_str, '%Y-%m-%d')
+        # An Indonesian day (UTC+7) starts at 17:00 UTC the previous day
+        start_utc = datetime(target_date.year, target_date.month, target_date.day, 17, 0, 0, tzinfo=timezone.utc) - timedelta(days=1)
         
+        paths = []
+        for i in range(24):
+            current_hour = start_utc + timedelta(hours=i)
+            # Path format based on your FTP log: YYYYMM/DD/
+            remote_dir = f"{self.base_path}{current_hour.strftime('%Y%m')}/{current_hour.strftime('%d')}/"
+            # Filename prefix format: Hnn_YYYYMMDD_hh00_...
+            filename_prefix = f"H09_{current_hour.strftime('%Y%m%d')}_{current_hour.strftime('%H')}00"
+            paths.append((remote_dir, filename_prefix))
+        return paths
+
+    def get_data_for_indonesian_day(self, target_date_str: str) -> pd.DataFrame:
+        """
+        Connects to the JAXA SFTP server and downloads all hourly Level 3 wildfire
+        CSV files that fall within a specific Indonesian day.
+        """
+        logging.info(f"Fetching JAXA L3 hourly data for Indonesian date: {target_date_str}")
+        hourly_paths = self._get_hourly_file_paths_for_indonesian_day(target_date_str)
+        all_hotspots_df = []
+
         try:
             with paramiko.Transport((self.host, self.port)) as transport:
                 transport.connect(username=self.username, password=self.password)
                 with paramiko.SFTPClient.from_transport(transport) as sftp:
                     logging.info(f"Successfully connected to JAXA SFTP server: {self.host}")
 
-                    # Construct the path to the specific daily file
-                    date_str_nodash = target_date.strftime('%Y%m%d')
-                    remote_dir = f"{self.base_path}{target_date.strftime('%Y%m')}/daily/"
-                    # The filename is predictable, e.g., H09_20250616_0000_1DWLF010_FLDK.06001_06001.csv
-                    # We will search for the key parts to be safe.
-                    
-                    files_in_dir = sftp.listdir(remote_dir)
-                    target_filename = None
-                    for filename in files_in_dir:
-                        if date_str_nodash in filename and "1DWLF" in filename:
-                            target_filename = filename
-                            break
-                    
-                    if not target_filename:
-                        logging.warning(f"No daily file found in {remote_dir} for {date_str_nodash}")
-                        return pd.DataFrame()
+                    for remote_dir, filename_prefix in hourly_paths:
+                        try:
+                            files_in_dir = sftp.listdir(remote_dir)
+                            target_filename = next((f for f in files_in_dir if f.startswith(filename_prefix) and f.endswith('.csv')), None)
 
-                    remote_filepath = remote_dir + target_filename
-                    logging.info(f"Processing JAXA daily file: {remote_filepath}")
-                    with sftp.open(remote_filepath, 'r') as f:
-                        content = f.read().decode('utf-8')
-                        # Format from README: year, month, day, lat, lon, FRP (mean), FRP (max), N
-                        col_names = ['year', 'month', 'day', 'latitude', 'longitude', 'frp_mean', 'frp_max', 'n_detections']
-                        df = pd.read_csv(io.StringIO(content), names=col_names, comment='#')
-                        logging.info(f"Successfully fetched and processed {len(df)} hotspots from JAXA daily file.")
-                        return df
+                            if not target_filename:
+                                logging.warning(f"No file found in {remote_dir} with prefix {filename_prefix}")
+                                continue
 
-        except FileNotFoundError:
-            logging.info(f"No JAXA daily data directory found for {target_date.strftime('%Y-%m-%d')}.")
-            return pd.DataFrame()
+                            remote_filepath = remote_dir + target_filename
+                            with sftp.open(remote_filepath, 'r') as f:
+                                content = f.read().decode('utf-8')
+                                # L3 Hourly Format: year, month, day, hour, lat, lon, FRP (mean), FRP (max), confidence, N
+                                col_names = ['year', 'month', 'day', 'hour', 'latitude', 'longitude', 'frp_mean', 'frp_max', 'confidence', 'n_detections']
+                                df = pd.read_csv(io.StringIO(content), names=col_names, header=None, comment='#')
+                                
+                                # Create datetime from columns
+                                df['acq_datetime'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']]).dt.tz_localize('UTC')
+                                all_hotspots_df.append(df)
+
+                        except FileNotFoundError:
+                            logging.warning(f"Hourly directory not found, skipping: {remote_dir}")
+                            continue
+                        except Exception as e:
+                            logging.error(f"Error processing directory {remote_dir}: {e}")
+
         except Exception as e:
             logging.error(f"An unexpected error occurred during JAXA SFTP operation: {e}", exc_info=True)
             return pd.DataFrame()
-        
-        return pd.DataFrame() # Should not be reached, but as a fallback
+
+        if not all_hotspots_df:
+            logging.warning("No JAXA hotspots found for the entire Indonesian day.")
+            return pd.DataFrame()
+            
+        final_df = pd.concat(all_hotspots_df, ignore_index=True)
+        logging.info(f"Successfully fetched and processed {len(final_df)} hotspots from JAXA for the full Indonesian day.")
+        return final_df
