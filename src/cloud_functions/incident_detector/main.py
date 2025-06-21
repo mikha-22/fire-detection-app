@@ -36,7 +36,6 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def _log_json(severity: str, message: str, **kwargs):
     log_entry = {"severity": severity.upper(), "message": message, "timestamp": datetime.now(timezone.utc).isoformat(), "component": "IncidentDetector", **kwargs}
-    # --- FIX: Ensure UTF-8 characters are not escaped for readability ---
     print(json.dumps(log_entry, default=str, ensure_ascii=False))
 
 def standardize_hotspot_df(df: pd.DataFrame, source_name: str) -> Optional[pd.DataFrame]:
@@ -109,7 +108,10 @@ def incident_detector_cloud_function(event, context, run_date_str: Optional[str]
         if jaxa_df is not None: standardized_dfs.append(standardize_hotspot_df(jaxa_df, 'JAXA'))
     except Exception as e: _log_json("ERROR", f"Failed to process JAXA data: {e}", exc_info=True)
 
-    if not standardized_dfs: _log_json("WARNING", "No hotspot data could be retrieved from any source. Exiting."); return
+    # --- FIX: Check if the list of dataframes is empty before concatenation ---
+    if not standardized_dfs: 
+        _log_json("WARNING", "No hotspot data could be retrieved from any source. Exiting gracefully.")
+        return
     
     fused_df = pd.concat(standardized_dfs, ignore_index=True)
     fused_df['lat_round'] = fused_df['latitude'].round(2)
@@ -180,7 +182,6 @@ def incident_detector_cloud_function(event, context, run_date_str: Optional[str]
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     output_blob_path = f"{GCS_PATHS['INCIDENTS_DETECTED']}/{run_date_str}/{FILE_NAMES['incident_data']}"
-    # --- FIX: Ensure UTF-8 characters are not escaped for readability ---
     jsonl_content = "\n".join([json.dumps(incident, indent=2, default=str, ensure_ascii=False) for incident in all_incidents])
     bucket.blob(output_blob_path).upload_from_string(jsonl_content, content_type='application/jsonl; charset=utf-8')
     _log_json("INFO", f"Successfully wrote {len(all_incidents)} enriched incidents to gs://{GCS_BUCKET_NAME}/{output_blob_path}")
