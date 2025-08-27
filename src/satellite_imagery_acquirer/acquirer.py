@@ -162,7 +162,7 @@ class SatelliteImageryAcquirer:
 # The main() function for testing remains unchanged.
 def main():
     _log_json("INFO", "Starting local image acquisition test.")
-    run_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    run_date = "2025-06-20"
     _log_json("INFO", f"Processing for run_date: {run_date}")
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)

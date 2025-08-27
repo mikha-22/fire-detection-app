@@ -1,5 +1,7 @@
 # Python
+**/*.csv
 __pycache__/
+*.csv
 *.pyc
 *.pyo
 *.pyd
@@ -12,6 +14,8 @@ fire-venv/
 .coverage
 .mypy_cache/
 .vscode/
+viirs-jpss1_*
+
 
 # Environment Variables
 .env
